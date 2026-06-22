@@ -1,0 +1,69 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# API keys
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+BINANCE_API_KEY   = os.getenv("BINANCE_API_KEY", "")
+BINANCE_SECRET    = os.getenv("BINANCE_SECRET", "")
+TELEGRAM_TOKEN    = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# Supabase (free Postgres cloud DB — replace SQLite)
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")   # anon/public key
+
+# News research (optional — NewsAPI.org free tier: 100 req/day)
+# Leave empty to rely on RSS feeds only (completely free, no API key)
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
+
+# CoinGecko — optional demo key for higher rate limits (free at coingecko.com)
+# Without a key, the free public API works fine (~30 req/min)
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")
+
+# LunarCrush — social sentiment intelligence (lunarcrush.com/developers)
+LUNARCRUSH_API_KEY = os.getenv("LUNARCRUSH_API_KEY", "")
+
+# Exchange
+TESTNET = os.getenv("TESTNET", "true").lower() == "true"
+SYMBOL  = "BTC/USDT"
+
+# Multi-asset trading — ETH alongside BTC
+SYMBOLS = ["BTC/USDT", "ETH/USDT"]
+ASSET_CONFIG = {
+    "BTC/USDT": {
+        "base": "BTC",
+        "base_trade_usd": 5.0,
+        "min_trade_usd": 2.0,
+        "max_trade_usd": 15.0,
+        "max_alloc_pct": 0.60,
+        "ws_symbol": "btcusdt",
+        "futures_symbol": "BTCUSDT",
+    },
+    "ETH/USDT": {
+        "base": "ETH",
+        "base_trade_usd": 3.0,
+        "min_trade_usd": 2.0,
+        "max_trade_usd": 10.0,
+        "max_alloc_pct": 0.25,
+        "ws_symbol": "ethusdt",
+        "futures_symbol": "ETHUSDT",
+    },
+}
+
+# Trading safety limits — code enforces these, Claude just suggests
+BASE_TRADE_USD     = 5.0    # Claude's default suggestion
+MIN_TRADE_USD      = 2.0    # Absolute floor per trade
+MAX_TRADE_USD      = 15.0   # Absolute ceiling per trade (7.5% of $200)
+MAX_BTC_ALLOC_PCT  = 0.60   # Stop buying if BTC > 60% of portfolio
+MAX_TOTAL_CRYPTO_PCT = 0.80 # Max total crypto allocation (BTC+ETH) = 80%
+STOP_LOSS_PCT      = 0.09   # Pause bot if total portfolio drops 9%
+
+# Bot behaviour
+ANALYSIS_INTERVAL_HOURS = 4   # Run Claude analysis every 4 hours
+
+# Claude models
+CLAUDE_MODEL      = "claude-haiku-4-5"      # frequent analysis — cheap
+CLAUDE_OPUS_MODEL = "claude-opus-4-8"       # weekly deep review only
+CLAUDE_MAX_TOKENS = 512

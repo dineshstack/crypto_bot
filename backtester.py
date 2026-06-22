@@ -1,0 +1,441 @@
+"""
+Backtesting engine — validate strategies against historical data before risking real money.
+
+Usage:
+  python backtester.py                     # backtest last 3 months
+  python backtester.py --months 6          # backtest last 6 months
+  python backtester.py --months 12 --plot  # backtest 1 year + save equity chart
+
+Simulates the full pipeline:
+  1. Fetch historical OHLCV data
+  2. Compute indicators (same as live market_data.py)
+  3. Run ML model predictions (if trained)
+  4. Apply risk manager sizing (Kelly + ATR)
+  5. Simulate trades with stop-loss / take-profit execution
+  6. Calculate performance metrics (Sharpe, drawdown, win rate, etc.)
+
+Does NOT call Claude API — uses ML predictions + simple rule-based decisions
+to test the quantitative edge independently of LLM reasoning.
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+import config
+import risk_manager
+from ml_signal import (
+    engineer_features, triple_barrier_label, detect_regime,
+    LOOKAHEAD_HOURS, PROFIT_TARGET_PCT, STOP_LOSS_PCT,
+)
+
+logger = logging.getLogger(__name__)
+
+INITIAL_CAPITAL = 200.0
+TRADING_FEE_PCT = 0.1  # Binance spot fee: 0.1%
+
+
+@dataclass
+class Trade:
+    entry_time: datetime
+    exit_time: datetime | None = None
+    action: str = ""
+    entry_price: float = 0
+    exit_price: float = 0
+    amount_usd: float = 0
+    btc_qty: float = 0
+    stop_loss: float = 0
+    take_profit: float = 0
+    pnl_usd: float = 0
+    pnl_pct: float = 0
+    exit_reason: str = ""  # "take_profit", "stop_loss", "time_exit"
+
+
+@dataclass
+class BacktestResult:
+    total_return_pct: float = 0
+    buy_and_hold_pct: float = 0
+    sharpe_ratio: float = 0
+    sortino_ratio: float = 0
+    max_drawdown_pct: float = 0
+    win_rate: float = 0
+    profit_factor: float = 0
+    total_trades: int = 0
+    avg_trade_pnl_pct: float = 0
+    avg_win_pct: float = 0
+    avg_loss_pct: float = 0
+    best_trade_pct: float = 0
+    worst_trade_pct: float = 0
+    wins: int = 0
+    losses: int = 0
+    holds: int = 0
+    avg_hold_hours: float = 0
+    final_equity: float = 0
+    equity_curve: list = field(default_factory=list)
+    trades: list = field(default_factory=list)
+
+
+def fetch_backtest_data(exchange, months: int = 3) -> pd.DataFrame:
+    """Fetch historical data for backtesting with pagination."""
+    total_candles = months * 30 * 24  # hourly candles
+    all_candles = []
+    since = int((datetime.now(timezone.utc) - timedelta(days=months * 30))
+                .timestamp() * 1000)
+
+    import time
+    while len(all_candles) < total_candles:
+        batch = exchange.fetch_ohlcv("BTC/USDT", "1h", since=since, limit=1000)
+        if not batch:
+            break
+        all_candles.extend(batch)
+        since = batch[-1][0] + 1
+        if len(batch) < 1000:
+            break
+        time.sleep(exchange.rateLimit / 1000)
+
+    df = pd.DataFrame(
+        all_candles[:total_candles],
+        columns=["ts", "open", "high", "low", "close", "volume"],
+    )
+    df = df.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+    return df
+
+
+def _simulate_trade_exit(candles: pd.DataFrame, entry_idx: int,
+                         entry_price: float, action: str,
+                         stop_loss: float, take_profit: float,
+                         max_bars: int = LOOKAHEAD_HOURS) -> tuple[int, float, str]:
+    """
+    Simulate price hitting stop-loss, take-profit, or time expiry.
+    Returns (exit_idx, exit_price, reason).
+    """
+    for i in range(entry_idx + 1, min(entry_idx + max_bars + 1, len(candles))):
+        high = candles.iloc[i]["high"]
+        low = candles.iloc[i]["low"]
+        close = candles.iloc[i]["close"]
+
+        if action == "buy":
+            if low <= stop_loss:
+                return i, stop_loss, "stop_loss"
+            if high >= take_profit:
+                return i, take_profit, "take_profit"
+        elif action == "sell":
+            if high >= stop_loss:
+                return i, stop_loss, "stop_loss"
+            if low <= take_profit:
+                return i, take_profit, "take_profit"
+
+    # Time exit — use closing price at end of window
+    exit_idx = min(entry_idx + max_bars, len(candles) - 1)
+    return exit_idx, candles.iloc[exit_idx]["close"], "time_exit"
+
+
+def run_backtest(exchange, months: int = 3) -> BacktestResult:
+    """
+    Run full backtest simulation.
+    Uses ML model predictions if available, otherwise falls back to
+    simple indicator-based signals.
+    """
+    logger.info("Backtest: Fetching %d months of data...", months)
+    df = fetch_backtest_data(exchange, months)
+    if len(df) < 500:
+        logger.error("Backtest: Not enough data (%d candles)", len(df))
+        return BacktestResult()
+
+    logger.info("Backtest: %d candles loaded. Engineering features...", len(df))
+    df = engineer_features(df)
+    df["regime"] = detect_regime(df)
+
+    # Try loading trained ML model for predictions
+    ml_available = False
+    try:
+        from ml_signal import _load_model
+        ensemble, meta = _load_model()
+        if ensemble and meta:
+            selected = ensemble["selected_features"]
+            missing = [f for f in selected if f not in df.columns]
+            for f in missing:
+                df[f] = 0
+            # Batch predict
+            X = df[selected].fillna(0)
+            import numpy as np
+            xgb_proba = ensemble["xgb"].predict_proba(X)
+            lgb_proba = ensemble["lgb"].predict_proba(X)
+            stack = np.hstack([xgb_proba, lgb_proba])
+            final_proba = ensemble["meta"].predict_proba(stack)
+            df["ml_buy_prob"] = final_proba[:, 2] if final_proba.shape[1] > 2 else 0
+            df["ml_sell_prob"] = final_proba[:, 0] if final_proba.shape[1] > 0 else 0
+            ml_available = True
+            logger.info("Backtest: ML model loaded — using ensemble predictions")
+    except Exception as exc:
+        logger.info("Backtest: No ML model — using indicator signals: %s", exc)
+
+    # If no ML, use simple signal rules
+    if not ml_available:
+        rsi = df.get("h1_rsi_14", pd.Series(50, index=df.index))
+        macd_hist = df.get("h1_macd_hist", pd.Series(0, index=df.index))
+        bb_pos = df.get("h1_bb_pos", pd.Series(0.5, index=df.index))
+
+        df["ml_buy_prob"] = 0.0
+        df["ml_sell_prob"] = 0.0
+
+        buy_mask = (rsi < 35) & (macd_hist > 0) & (bb_pos < 0.2)
+        sell_mask = (rsi > 70) & (macd_hist < 0) & (bb_pos > 0.8)
+        df.loc[buy_mask, "ml_buy_prob"] = 0.65
+        df.loc[sell_mask, "ml_sell_prob"] = 0.65
+
+    # ── Simulation loop ──
+    usdt = INITIAL_CAPITAL
+    btc = 0.0
+    trades: list[Trade] = []
+    equity_curve = []
+    cooldown = 0
+
+    logger.info("Backtest: Running simulation...")
+    atr_col = df.get("h1_atr_pct", pd.Series(1.5, index=df.index))
+
+    for i in range(100, len(df) - LOOKAHEAD_HOURS - 1):
+        price = df.iloc[i]["close"]
+        total_equity = usdt + btc * price
+        equity_curve.append({"ts": df.iloc[i]["ts"], "equity": total_equity})
+
+        if cooldown > 0:
+            cooldown -= 1
+            continue
+
+        buy_prob = df.iloc[i]["ml_buy_prob"]
+        sell_prob = df.iloc[i]["ml_sell_prob"]
+        atr_pct = atr_col.iloc[i] if i < len(atr_col) else 1.5
+        atr_val = price * atr_pct / 100
+
+        # Decision logic
+        action = "hold"
+        confidence = 0.5
+        btc_alloc = (btc * price) / total_equity if total_equity > 0 else 0
+
+        if buy_prob > 0.55 and btc_alloc < config.MAX_BTC_ALLOC_PCT:
+            action = "buy"
+            confidence = min(0.95, buy_prob)
+        elif sell_prob > 0.55 and btc > 0:
+            action = "sell"
+            confidence = min(0.95, sell_prob)
+
+        if action == "hold":
+            continue
+
+        # Risk-managed sizing
+        snapshot = {"price": price, "atr": atr_val, "atr_pct": atr_pct}
+        portfolio = {"usdt": usdt, "btc": btc}
+        risk = risk_manager.assess_trade(action, confidence, snapshot, portfolio)
+        amount = risk.recommended_usd
+
+        if action == "buy" and usdt >= amount + 0.5:
+            fee = amount * TRADING_FEE_PCT / 100
+            btc_qty = (amount - fee) / price
+            usdt -= amount
+            btc += btc_qty
+
+            exit_idx, exit_price, reason = _simulate_trade_exit(
+                df, i, price, "buy", risk.stop_loss_price, risk.take_profit_price,
+            )
+
+            exit_fee = btc_qty * exit_price * TRADING_FEE_PCT / 100
+            pnl = btc_qty * (exit_price - price) - fee - exit_fee
+            pnl_pct = (exit_price / price - 1) * 100
+
+            usdt += btc_qty * exit_price - exit_fee
+            btc -= btc_qty
+
+            trades.append(Trade(
+                entry_time=datetime.fromtimestamp(df.iloc[i]["ts"] / 1000, tz=timezone.utc),
+                exit_time=datetime.fromtimestamp(df.iloc[exit_idx]["ts"] / 1000, tz=timezone.utc),
+                action="buy", entry_price=price, exit_price=exit_price,
+                amount_usd=amount, btc_qty=btc_qty,
+                stop_loss=risk.stop_loss_price, take_profit=risk.take_profit_price,
+                pnl_usd=pnl, pnl_pct=pnl_pct, exit_reason=reason,
+            ))
+            cooldown = LOOKAHEAD_HOURS
+
+        elif action == "sell" and btc > 0:
+            sell_btc = min(btc, amount / price)
+            fee = sell_btc * price * TRADING_FEE_PCT / 100
+            usdt += sell_btc * price - fee
+            btc -= sell_btc
+
+            exit_idx, exit_price, reason = _simulate_trade_exit(
+                df, i, price, "sell", risk.stop_loss_price, risk.take_profit_price,
+            )
+
+            pnl = sell_btc * (price - exit_price) - fee
+            pnl_pct = (price / exit_price - 1) * 100 if exit_price > 0 else 0
+
+            trades.append(Trade(
+                entry_time=datetime.fromtimestamp(df.iloc[i]["ts"] / 1000, tz=timezone.utc),
+                exit_time=datetime.fromtimestamp(df.iloc[exit_idx]["ts"] / 1000, tz=timezone.utc),
+                action="sell", entry_price=price, exit_price=exit_price,
+                amount_usd=sell_btc * price, btc_qty=sell_btc,
+                stop_loss=risk.stop_loss_price, take_profit=risk.take_profit_price,
+                pnl_usd=pnl, pnl_pct=pnl_pct, exit_reason=reason,
+            ))
+            cooldown = LOOKAHEAD_HOURS
+
+    # Final equity
+    final_price = df.iloc[-1]["close"]
+    final_equity = usdt + btc * final_price
+
+    # ── Calculate metrics ──
+    result = BacktestResult()
+    result.final_equity = round(final_equity, 2)
+    result.equity_curve = equity_curve
+    result.trades = trades
+    result.total_trades = len(trades)
+
+    # Buy and hold benchmark
+    start_price = df.iloc[100]["close"]
+    end_price = df.iloc[-1]["close"]
+    result.buy_and_hold_pct = round((end_price / start_price - 1) * 100, 2)
+    result.total_return_pct = round((final_equity / INITIAL_CAPITAL - 1) * 100, 2)
+
+    if trades:
+        wins = [t for t in trades if t.pnl_usd > 0]
+        losses = [t for t in trades if t.pnl_usd <= 0]
+        result.wins = len(wins)
+        result.losses = len(losses)
+        result.win_rate = round(len(wins) / len(trades), 3) if trades else 0
+
+        pnls = [t.pnl_pct for t in trades]
+        result.avg_trade_pnl_pct = round(np.mean(pnls), 3) if pnls else 0
+        result.avg_win_pct = round(np.mean([t.pnl_pct for t in wins]), 3) if wins else 0
+        result.avg_loss_pct = round(np.mean([t.pnl_pct for t in losses]), 3) if losses else 0
+        result.best_trade_pct = round(max(pnls), 3) if pnls else 0
+        result.worst_trade_pct = round(min(pnls), 3) if pnls else 0
+
+        gross_profit = sum(t.pnl_usd for t in wins)
+        gross_loss = abs(sum(t.pnl_usd for t in losses))
+        result.profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999
+
+        hold_hours = [(t.exit_time - t.entry_time).total_seconds() / 3600
+                      for t in trades if t.exit_time]
+        result.avg_hold_hours = round(np.mean(hold_hours), 1) if hold_hours else 0
+
+    # Sharpe and Sortino from equity curve
+    if len(equity_curve) > 10:
+        equities = pd.Series([e["equity"] for e in equity_curve])
+        returns = equities.pct_change().dropna()
+        if len(returns) > 1 and returns.std() > 0:
+            # Annualize: hourly returns × sqrt(8760 hours/year)
+            result.sharpe_ratio = round(
+                returns.mean() / returns.std() * np.sqrt(8760), 2
+            )
+            downside = returns[returns < 0]
+            if len(downside) > 0 and downside.std() > 0:
+                result.sortino_ratio = round(
+                    returns.mean() / downside.std() * np.sqrt(8760), 2
+                )
+
+    # Max drawdown
+    if equity_curve:
+        equities = [e["equity"] for e in equity_curve]
+        peak = equities[0]
+        max_dd = 0
+        for eq in equities:
+            peak = max(peak, eq)
+            dd = (peak - eq) / peak * 100
+            max_dd = max(max_dd, dd)
+        result.max_drawdown_pct = round(max_dd, 2)
+
+    return result
+
+
+def print_report(r: BacktestResult):
+    """Print backtest results to console."""
+    print("\n" + "=" * 60)
+    print("  BACKTEST RESULTS")
+    print("=" * 60)
+    print(f"  Starting capital:   ${INITIAL_CAPITAL:.2f}")
+    print(f"  Final equity:       ${r.final_equity:.2f}")
+    print(f"  Bot return:         {r.total_return_pct:+.2f}%")
+    print(f"  Buy & hold return:  {r.buy_and_hold_pct:+.2f}%")
+    print(f"  Alpha vs B&H:       {r.total_return_pct - r.buy_and_hold_pct:+.2f}%")
+    print("-" * 60)
+    print(f"  Total trades:       {r.total_trades}")
+    print(f"  Wins / Losses:      {r.wins} / {r.losses}")
+    print(f"  Win rate:           {r.win_rate:.1%}")
+    print(f"  Profit factor:      {r.profit_factor:.2f}")
+    print(f"  Avg hold time:      {r.avg_hold_hours:.1f}h")
+    print("-" * 60)
+    print(f"  Avg trade P&L:      {r.avg_trade_pnl_pct:+.3f}%")
+    print(f"  Avg win:            {r.avg_win_pct:+.3f}%")
+    print(f"  Avg loss:           {r.avg_loss_pct:+.3f}%")
+    print(f"  Best trade:         {r.best_trade_pct:+.3f}%")
+    print(f"  Worst trade:        {r.worst_trade_pct:+.3f}%")
+    print("-" * 60)
+    print(f"  Sharpe ratio:       {r.sharpe_ratio:.2f}")
+    print(f"  Sortino ratio:      {r.sortino_ratio:.2f}")
+    print(f"  Max drawdown:       {r.max_drawdown_pct:.2f}%")
+    print("=" * 60)
+
+    if r.sharpe_ratio >= 1.5:
+        print("  Assessment: STRONG — strategy shows clear edge")
+    elif r.sharpe_ratio >= 1.0:
+        print("  Assessment: GOOD — positive risk-adjusted returns")
+    elif r.sharpe_ratio >= 0.5:
+        print("  Assessment: MARGINAL — edge exists but thin")
+    else:
+        print("  Assessment: WEAK — insufficient edge, review strategy")
+    print()
+
+    # Exit reason breakdown
+    if r.trades:
+        reasons = {}
+        for t in r.trades:
+            reasons[t.exit_reason] = reasons.get(t.exit_reason, 0) + 1
+        print("  Exit reasons:")
+        for reason, count in sorted(reasons.items(), key=lambda x: -x[1]):
+            pct = count / len(r.trades) * 100
+            print(f"    {reason:15s} {count:4d} ({pct:.1f}%)")
+        print()
+
+
+def save_equity_csv(r: BacktestResult, path: str = "backtest_equity.csv"):
+    """Save equity curve to CSV for charting."""
+    if not r.equity_curve:
+        return
+    df = pd.DataFrame(r.equity_curve)
+    df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+    df.to_csv(path, index=False)
+    print(f"  Equity curve saved to {path}")
+
+
+# ── CLI entry point ──────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+    parser = argparse.ArgumentParser(description="Backtest the trading bot strategy")
+    parser.add_argument("--months", type=int, default=3, help="Months of history to test")
+    parser.add_argument("--csv", action="store_true", help="Save equity curve CSV")
+    args = parser.parse_args()
+
+    import ccxt
+    exchange = ccxt.binance({
+        "apiKey": config.BINANCE_API_KEY,
+        "secret": config.BINANCE_SECRET,
+        "enableRateLimit": True,
+        "options": {"defaultType": "spot"},
+    })
+    if config.TESTNET:
+        exchange.set_sandbox_mode(True)
+
+    result = run_backtest(exchange, months=args.months)
+    print_report(result)
+
+    if args.csv:
+        save_equity_csv(result)

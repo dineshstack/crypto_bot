@@ -1,0 +1,17 @@
+anthropic>=0.92.0
+ccxt>=4.4.0
+python-telegram-bot>=21.0
+pandas>=2.2.0
+ta>=0.11.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+supabase>=2.0.0
+feedparser>=6.0.0
+xgboost>=2.1.0
+lightgbm>=4.5.0
+scikit-learn>=1.5.0
+joblib>=1.4.0
+optuna>=4.0.0
+BorutaShap>=1.0.0
+yfinance>=0.2.40
+websockets>=13.0
