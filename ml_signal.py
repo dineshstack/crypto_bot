@@ -535,7 +535,7 @@ def train_model(exchange) -> dict:
     # Train meta-learner on stacked CV predictions
     meta_X = np.vstack(meta_X_all)
     meta_y = np.concatenate(meta_y_all)
-    meta_model = LogisticRegression(max_iter=1000, multi_class="multinomial")
+    meta_model = LogisticRegression(max_iter=1000)
     meta_model.fit(meta_X, meta_y)
 
     # Train final base models on ALL data
