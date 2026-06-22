@@ -42,7 +42,7 @@ DRIFT_PATH = MODEL_DIR / "drift_log.joblib"
 LOOKAHEAD_HOURS = 4
 PROFIT_TARGET_PCT = 1.5
 STOP_LOSS_PCT = 1.5
-MIN_TRAIN_ROWS = 1000
+MIN_TRAIN_ROWS = 500
 RETRAIN_INTERVAL_DAYS = 7
 DRIFT_ACCURACY_THRESHOLD = 0.47
 DRIFT_WINDOW = 20
@@ -339,7 +339,7 @@ def train_model(exchange) -> dict:
     logger.info("ML v2: Fetching 5000+ candles across 3 timeframes...")
     import ccxt
     data_exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "spot"}})
-    df_1h = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "1h", total_candles=5000)
+    df_1h = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "1h", total_candles=8000)
     time.sleep(1)
     df_4h = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "4h", total_candles=2000)
     time.sleep(1)
