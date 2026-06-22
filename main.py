@@ -872,9 +872,9 @@ def main():
         k for k in (
             "ANTHROPIC_API_KEY", "BINANCE_API_KEY", "BINANCE_SECRET",
             "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID",
-            "SUPABASE_URL", "SUPABASE_KEY",
+            "MYSQL_PASSWORD",
         )
-        if not getattr(config, k)
+        if not getattr(config, k, None)
     ]
     if missing:
         logger.error("Missing env vars: %s", missing)
