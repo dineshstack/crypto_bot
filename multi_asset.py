@@ -77,7 +77,7 @@ def get_asset_snapshot(exchange: ccxt.binance, symbol: str) -> dict:
         "price": round(price, 2),
         "change_24h_pct": round((price / close.iloc[-24] - 1) * 100, 2),
         "change_7d_pct": round((price / close.iloc[0] - 1) * 100, 2),
-        "volume_24h": round(volume.iloc[-24:].sum(), 2),
+        "volume_24h_btc": round(volume.iloc[-24:].sum(), 2),
         "rsi": round(rsi.iloc[-1], 1),
         "sma20": round(sma20.iloc[-1], 2),
         "sma50": round(sma50.iloc[-1], 2),
