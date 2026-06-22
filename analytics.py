@@ -36,11 +36,10 @@ def _get_all_trades(days: int | None = None) -> list[dict]:
 def _get_snapshots(days: int | None = None) -> list[dict]:
     """Fetch portfolio snapshots for equity curve."""
     try:
-        q = db._db().table("portfolio_snapshots").select("created_at,total_usd").order("created_at")
+        since = None
         if days:
-            start = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-            q = q.gte("created_at", start)
-        return (q.limit(2000).execute()).data or []
+            since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        return db.get_snapshots(limit=2000, since=since)
     except Exception:
         return []
 

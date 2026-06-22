@@ -442,10 +442,10 @@ Evaluate all dimensions and return the JSON investment report."""
 # ── Supabase persistence ───────────────────────────────────────────────────
 
 def save_research(report: dict) -> str:
-    """Save a research report to Supabase. Returns the row UUID."""
+    """Save a research report to MySQL. Returns the row ID."""
     import database as db
     try:
-        r = db._db().table("coin_research").insert({
+        row_id = db.insert_coin_research({
             "coin_id":          report.get("coin_id"),
             "symbol":           report.get("symbol"),
             "name":             report.get("name"),
@@ -468,8 +468,8 @@ def save_research(report: dict) -> str:
             "github_commits_4w": report.get("commits_4w"),
             "twitter_followers": report.get("twitter_flw"),
             "raw_data":         report.get("raw_data"),
-        }).execute()
-        return r.data[0]["id"]
+        })
+        return str(row_id)
     except Exception as exc:
         logger.error("Failed to save research: %s", exc)
         return ""
@@ -479,20 +479,16 @@ def add_to_watchlist(coin_id: str, symbol: str, name: str,
                      price: float, target_usd: float, research_id: str):
     import database as db
     try:
-        db._db().table("coin_watchlist").upsert({
+        db.upsert_watchlist({
             "coin_id":     coin_id,
             "symbol":      symbol,
             "name":        name,
             "entry_price": price,
             "target_usd":  target_usd,
-            "research_id": research_id or None,
-            "active":      True,
-        }, on_conflict="coin_id").execute()
-        # Also mark the research row as watchlisted
+            "research_id": int(research_id) if research_id else None,
+        })
         if research_id:
-            db._db().table("coin_research").update(
-                {"on_watchlist": True}
-            ).eq("id", research_id).execute()
+            db.update_research_watchlist(int(research_id))
     except Exception as exc:
         logger.error("Failed to add watchlist: %s", exc)
 
@@ -500,14 +496,7 @@ def add_to_watchlist(coin_id: str, symbol: str, name: str,
 def get_watchlist() -> list[dict]:
     import database as db
     try:
-        r = (
-            db._db().table("coin_watchlist")
-            .select("*")
-            .eq("active", True)
-            .order("created_at", desc=True)
-            .execute()
-        )
-        return r.data or []
+        return db.get_watchlist()
     except Exception as exc:
         logger.error("Failed to get watchlist: %s", exc)
         return []
@@ -516,14 +505,7 @@ def get_watchlist() -> list[dict]:
 def get_recent_research(limit: int = 10) -> list[dict]:
     import database as db
     try:
-        r = (
-            db._db().table("coin_research")
-            .select("symbol,name,investment_score,verdict,created_at,on_watchlist,summary")
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        return r.data or []
+        return db.get_recent_research(limit)
     except Exception as exc:
         logger.error("Failed to get recent research: %s", exc)
         return []

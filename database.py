@@ -1,100 +1,139 @@
 """
-Supabase-backed data layer.
-Replaces portfolio.py — all trade logging, snapshots, lessons, and reviews live here.
+MySQL-backed data layer.
+All trade logging, snapshots, lessons, and reviews live here.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
-from supabase import create_client, Client
+
+import pymysql
+from pymysql.cursors import DictCursor
+
 import config
 
 logger = logging.getLogger(__name__)
 
-_client: Client | None = None
+_pool: pymysql.Connection | None = None
 
 
-def _db() -> Client:
-    global _client
-    if _client is None:
-        _client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
-    return _client
+def _db() -> pymysql.Connection:
+    """Get or create a MySQL connection (auto-reconnects)."""
+    global _pool
+    if _pool is None or not _pool.open:
+        _pool = pymysql.connect(
+            host=config.MYSQL_HOST,
+            port=config.MYSQL_PORT,
+            user=config.MYSQL_USER,
+            password=config.MYSQL_PASSWORD,
+            database=config.MYSQL_DATABASE,
+            charset="utf8mb4",
+            cursorclass=DictCursor,
+            autocommit=True,
+            connect_timeout=10,
+            read_timeout=30,
+            write_timeout=30,
+        )
+    else:
+        _pool.ping(reconnect=True)
+    return _pool
+
+
+def _execute(sql: str, params: tuple = (), fetch: str = "none") -> list | dict | int:
+    """Execute SQL and return results. fetch: 'none', 'one', 'all'."""
+    conn = _db()
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        if fetch == "one":
+            return cur.fetchone()
+        elif fetch == "all":
+            return cur.fetchall() or []
+        return cur.lastrowid
 
 
 # ── Bootstrap ───────────────────────────────────────────────────────────────
 
 def init():
-    """Verify Supabase connection is reachable."""
+    """Verify MySQL connection is reachable."""
     try:
-        _db().table("portfolio_snapshots").select("id").limit(1).execute()
-        logger.info("Supabase connected OK")
+        _execute("SELECT 1", fetch="one")
+        logger.info("MySQL connected OK (%s@%s/%s)",
+                     config.MYSQL_USER, config.MYSQL_HOST, config.MYSQL_DATABASE)
     except Exception as exc:
-        logger.error("Supabase connection failed: %s", exc)
+        logger.error("MySQL connection failed: %s", exc)
         raise
 
 
 # ── Trades ───────────────────────────────────────────────────────────────────
 
 def log_trade(result: dict, decision: dict, snapshot: dict) -> str:
-    """Insert a trade record; return its UUID."""
-    row = {
-        "action":     result["action"],
-        "amount_usd": result.get("amount_usd", 0),
-        "btc_qty":    result.get("btc_amount", 0),
-        "price":      snapshot["price"],
-        "decision":   decision,
-        "market":     snapshot,
-        "success":    result["success"],
-        "error":      result.get("error"),
-    }
-    r = _db().table("trades").insert(row).execute()
-    return r.data[0]["id"]
+    """Insert a trade record; return its ID."""
+    row_id = _execute(
+        """INSERT INTO trades (action, amount_usd, btc_qty, price, decision, market, success, error)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+        (
+            result["action"],
+            result.get("amount_usd", 0),
+            result.get("btc_amount", 0),
+            snapshot["price"],
+            json.dumps(decision),
+            json.dumps(snapshot),
+            1 if result["success"] else 0,
+            result.get("error"),
+        ),
+    )
+    return str(row_id)
 
 
 def get_recent_trades(n: int = 5) -> list[dict]:
-    r = (
-        _db().table("trades")
-        .select("created_at,action,amount_usd,price,success,error,outcome,decision")
-        .order("created_at", desc=True)
-        .limit(n)
-        .execute()
+    rows = _execute(
+        """SELECT id, created_at, action, amount_usd, price, success, error,
+                  outcome, decision
+           FROM trades ORDER BY created_at DESC LIMIT %s""",
+        (n,),
+        fetch="all",
     )
-    return r.data or []
+    for r in rows:
+        if isinstance(r.get("decision"), str):
+            r["decision"] = json.loads(r["decision"])
+        r["created_at"] = str(r["created_at"])
+    return rows
 
 
 def get_last_unevaluated_trade() -> dict | None:
     """Most recent successful buy/sell that hasn't been outcome-evaluated yet."""
-    r = (
-        _db().table("trades")
-        .select("*")
-        .neq("action", "hold")
-        .is_("outcome", "null")
-        .eq("success", True)
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
+    return _execute(
+        """SELECT * FROM trades
+           WHERE action != 'hold' AND outcome IS NULL AND success = 1
+           ORDER BY created_at DESC LIMIT 1""",
+        fetch="one",
     )
-    return r.data[0] if r.data else None
 
 
 def update_trade_outcome(trade_id: str, outcome: str, price_after: float):
-    _db().table("trades").update({
-        "outcome":          outcome,
-        "price_after_4h":   price_after,
-        "lesson_generated": outcome == "wrong",
-    }).eq("id", trade_id).execute()
+    _execute(
+        """UPDATE trades SET outcome = %s, price_after_4h = %s,
+                  lesson_generated = %s WHERE id = %s""",
+        (outcome, price_after, 1 if outcome == "wrong" else 0, trade_id),
+    )
 
 
 def get_trades_in_period(start: datetime, end: datetime) -> list[dict]:
-    r = (
-        _db().table("trades")
-        .select("*")
-        .gte("created_at", start.isoformat())
-        .lte("created_at", end.isoformat())
-        .order("created_at")
-        .execute()
+    rows = _execute(
+        """SELECT * FROM trades
+           WHERE created_at >= %s AND created_at <= %s
+           ORDER BY created_at""",
+        (start, end),
+        fetch="all",
     )
-    return r.data or []
+    for r in rows:
+        if isinstance(r.get("decision"), str):
+            r["decision"] = json.loads(r["decision"])
+        if isinstance(r.get("market"), str):
+            r["market"] = json.loads(r["market"])
+        r["created_at"] = str(r["created_at"])
+    return rows
 
 
 # ── Portfolio snapshots ───────────────────────────────────────────────────────
@@ -102,45 +141,38 @@ def get_trades_in_period(start: datetime, end: datetime) -> list[dict]:
 def save_snapshot(usdt: float, btc: float, price: float) -> float:
     """Save portfolio snapshot, return total USD value."""
     total = usdt + btc * price
-    _db().table("portfolio_snapshots").insert({
-        "usdt": usdt, "btc": btc, "price": price, "total_usd": total,
-    }).execute()
+    _execute(
+        "INSERT INTO portfolio_snapshots (usdt, btc, price, total_usd) VALUES (%s, %s, %s, %s)",
+        (usdt, btc, price, total),
+    )
     return total
 
 
 def get_first_snapshot_total() -> float | None:
-    r = (
-        _db().table("portfolio_snapshots")
-        .select("total_usd")
-        .order("created_at")
-        .limit(1)
-        .execute()
+    row = _execute(
+        "SELECT total_usd FROM portfolio_snapshots ORDER BY created_at LIMIT 1",
+        fetch="one",
     )
-    return r.data[0]["total_usd"] if r.data else None
+    return float(row["total_usd"]) if row else None
 
 
 # ── Lessons ───────────────────────────────────────────────────────────────────
 
 def save_lesson(text: str, source: str, trade_id: str | None = None) -> str:
-    r = _db().table("lessons").insert({
-        "lesson":   text,
-        "source":   source,
-        "trade_id": trade_id,
-        "active":   True,
-    }).execute()
-    return r.data[0]["id"]
+    row_id = _execute(
+        "INSERT INTO lessons (lesson, source, trade_id, active) VALUES (%s, %s, %s, 1)",
+        (text, source, trade_id),
+    )
+    return str(row_id)
 
 
 def get_active_lessons(limit: int = 5) -> list[str]:
-    r = (
-        _db().table("lessons")
-        .select("lesson")
-        .eq("active", True)
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
+    rows = _execute(
+        "SELECT lesson FROM lessons WHERE active = 1 ORDER BY created_at DESC LIMIT %s",
+        (limit,),
+        fetch="all",
     )
-    return [row["lesson"] for row in (r.data or [])]
+    return [r["lesson"] for r in rows]
 
 
 # ── Weekly reviews ────────────────────────────────────────────────────────────
@@ -154,28 +186,24 @@ def save_weekly_review(
     pnl:          float,
     review_text:  str,
 ):
-    _db().table("weekly_reviews").insert({
-        "period_start":   period_start.isoformat(),
-        "period_end":     period_end.isoformat(),
-        "total_trades":   total,
-        "correct_trades": correct,
-        "wrong_trades":   wrong,
-        "pnl_usd":        pnl,
-        "review_text":    review_text,
-    }).execute()
+    _execute(
+        """INSERT INTO weekly_reviews
+           (period_start, period_end, total_trades, correct_trades, wrong_trades, pnl_usd, review_text)
+           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+        (period_start, period_end, total, correct, wrong, pnl, review_text),
+    )
 
 
 def get_last_weekly_review_date() -> datetime | None:
-    r = (
-        _db().table("weekly_reviews")
-        .select("created_at")
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
+    row = _execute(
+        "SELECT created_at FROM weekly_reviews ORDER BY created_at DESC LIMIT 1",
+        fetch="one",
     )
-    if r.data:
-        ts = r.data[0]["created_at"]
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    if row:
+        ts = row["created_at"]
+        if isinstance(ts, str):
+            return datetime.fromisoformat(ts)
+        return ts.replace(tzinfo=timezone.utc)
     return None
 
 
@@ -187,38 +215,151 @@ def save_pending_confirmation(
     market:    dict,
     portfolio: dict,
 ):
-    _db().table("pending_confirmations").insert({
-        "id":        conf_id,
-        "decision":  decision,
-        "market":    market,
-        "portfolio": portfolio,
-        "status":    "pending",
-    }).execute()
+    _execute(
+        """INSERT INTO pending_confirmations (id, decision, market, portfolio, status)
+           VALUES (%s, %s, %s, %s, 'pending')""",
+        (conf_id, json.dumps(decision), json.dumps(market), json.dumps(portfolio)),
+    )
 
 
 def update_confirmation_status(conf_id: str, status: str):
-    _db().table("pending_confirmations").update(
-        {"status": status}
-    ).eq("id", conf_id).execute()
+    _execute(
+        "UPDATE pending_confirmations SET status = %s WHERE id = %s",
+        (status, conf_id),
+    )
 
 
-# ── Bot events (activity log for web dashboard) ──────────────────────────────
+# ── Bot events ────────────────────────────────────────────────────────────────
 
 def log_event(event: str, message: str, level: str = "info", data: dict = None):
-    """Log a structured event for the web dashboard activity feed."""
+    """Log a structured event for the dashboard activity feed."""
     try:
-        _db().table("bot_events").insert({
-            "event":   event,
-            "message": message,
-            "level":   level,
-            "data":    data or {},
-        }).execute()
+        _execute(
+            "INSERT INTO bot_events (event, message, level, data) VALUES (%s, %s, %s, %s)",
+            (event, message, level, json.dumps(data or {})),
+        )
     except Exception as exc:
         logger.debug("Event log failed: %s", exc)
 
 
 def get_events(limit: int = 50, level: str = None) -> list[dict]:
-    q = _db().table("bot_events").select("*").order("created_at", desc=True)
     if level:
-        q = q.eq("level", level)
-    return (q.limit(limit).execute()).data or []
+        rows = _execute(
+            "SELECT * FROM bot_events WHERE level = %s ORDER BY created_at DESC LIMIT %s",
+            (level, limit),
+            fetch="all",
+        )
+    else:
+        rows = _execute(
+            "SELECT * FROM bot_events ORDER BY created_at DESC LIMIT %s",
+            (limit,),
+            fetch="all",
+        )
+    for r in rows:
+        if isinstance(r.get("data"), str):
+            r["data"] = json.loads(r["data"])
+        r["created_at"] = str(r["created_at"])
+    return rows
+
+
+# ── Coin research (used by coin_researcher.py) ───────────────────────────────
+
+def insert_coin_research(data: dict) -> int:
+    """Insert a coin research row, return its ID."""
+    return _execute(
+        """INSERT INTO coin_research
+           (coin_id, symbol, name, investment_score, team_score, technology_score,
+            market_score, tokenomics_score, usecase_score, verdict, suggested_usd,
+            hold_months, risks, opportunities, summary, price_usd, market_cap_usd,
+            volume_24h_usd, price_change_7d, github_commits_4w, twitter_followers, raw_data)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (
+            data.get("coin_id"), data.get("symbol"), data.get("name"),
+            data.get("investment_score", 0), data.get("team_score", 0),
+            data.get("technology_score", 0), data.get("market_score", 0),
+            data.get("tokenomics_score", 0), data.get("usecase_score", 0),
+            data.get("verdict"), data.get("suggested_usd", 0),
+            data.get("hold_months", 0),
+            json.dumps(data.get("risks", [])),
+            json.dumps(data.get("opportunities", [])),
+            data.get("summary"),
+            data.get("price_usd"), data.get("market_cap_usd"),
+            data.get("volume_24h_usd"), data.get("price_change_7d"),
+            data.get("github_commits_4w"), data.get("twitter_followers"),
+            json.dumps(data.get("raw_data")) if data.get("raw_data") else None,
+        ),
+    )
+
+
+def upsert_watchlist(data: dict):
+    """Insert or update a watchlist entry."""
+    _execute(
+        """INSERT INTO coin_watchlist (coin_id, symbol, name, entry_price, target_usd, research_id, active)
+           VALUES (%s, %s, %s, %s, %s, %s, 1)
+           ON DUPLICATE KEY UPDATE
+             symbol = VALUES(symbol), name = VALUES(name),
+             entry_price = VALUES(entry_price), target_usd = VALUES(target_usd),
+             research_id = VALUES(research_id), active = 1""",
+        (
+            data["coin_id"], data["symbol"], data.get("name"),
+            data.get("entry_price", 0), data.get("target_usd", 0),
+            data.get("research_id"),
+        ),
+    )
+
+
+def update_research_watchlist(research_id: int):
+    """Mark a research row as watchlisted."""
+    _execute("UPDATE coin_research SET on_watchlist = 1 WHERE id = %s", (research_id,))
+
+
+def get_watchlist() -> list[dict]:
+    rows = _execute(
+        "SELECT * FROM coin_watchlist WHERE active = 1 ORDER BY created_at DESC",
+        fetch="all",
+    )
+    for r in rows:
+        r["created_at"] = str(r["created_at"])
+    return rows
+
+
+def get_recent_research(limit: int = 10) -> list[dict]:
+    rows = _execute(
+        """SELECT id, symbol, name, investment_score, verdict, created_at, on_watchlist, summary
+           FROM coin_research ORDER BY created_at DESC LIMIT %s""",
+        (limit,),
+        fetch="all",
+    )
+    for r in rows:
+        r["created_at"] = str(r["created_at"])
+    return rows
+
+
+def get_research_by_id(research_id: int) -> dict | None:
+    return _execute(
+        "SELECT coin_id, name, suggested_usd FROM coin_research WHERE id = %s",
+        (research_id,),
+        fetch="one",
+    )
+
+
+# ── Analytics helpers (used by analytics.py) ──────────────────────────────────
+
+def get_snapshots(limit: int = 2000, since: str = None) -> list[dict]:
+    """Get portfolio snapshots for equity curve."""
+    if since:
+        rows = _execute(
+            """SELECT created_at, total_usd FROM portfolio_snapshots
+               WHERE created_at >= %s ORDER BY created_at LIMIT %s""",
+            (since, limit),
+            fetch="all",
+        )
+    else:
+        rows = _execute(
+            "SELECT created_at, total_usd FROM portfolio_snapshots ORDER BY created_at LIMIT %s",
+            (limit,),
+            fetch="all",
+        )
+    for r in rows:
+        r["created_at"] = str(r["created_at"])
+    return rows

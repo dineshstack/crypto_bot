@@ -203,10 +203,7 @@ async def handle_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
             price = float(price_parts[0]) if price_parts else 0.0
             # Look up coin details from the research record
             try:
-                rows = db._db().table("coin_research")\
-                    .select("coin_id,name,suggested_usd")\
-                    .eq("id", db_id).limit(1).execute()
-                row = rows.data[0] if rows.data else {}
+                row = db.get_research_by_id(int(db_id)) or {}
                 coin_researcher.add_to_watchlist(
                     row.get("coin_id", symbol.lower()),
                     symbol,
@@ -341,6 +338,8 @@ async def run_cycle():
 
         # Execute (executor has its own code-level safety checks)
         result = executor.execute(exchange, decision, snap, port)
+        if result.get("risk_data"):
+            decision["risk_data"] = result["risk_data"]
         db.log_trade(result, decision, snap)
         db.log_event("trade", f"{decision['action'].upper()} ${decision['trade_usd']:.2f}",
                      data={"action": decision["action"], "amount": decision["trade_usd"],

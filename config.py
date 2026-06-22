@@ -10,9 +10,15 @@ BINANCE_SECRET    = os.getenv("BINANCE_SECRET", "")
 TELEGRAM_TOKEN    = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# Supabase (free Postgres cloud DB — replace SQLite)
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")   # anon/public key
+# MySQL (local on VPS — replaces Supabase)
+MYSQL_HOST     = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT     = int(os.getenv("MYSQL_PORT", "3306"))
+MYSQL_USER     = os.getenv("MYSQL_USER", "crypto_bot")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "crypto_bot")
+
+# API server key (for dashboard → VPS API authentication)
+API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 
 # News research (optional — NewsAPI.org free tier: 100 req/day)
 # Leave empty to rely on RSS feeds only (completely free, no API key)
