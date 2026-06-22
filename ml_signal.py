@@ -335,13 +335,15 @@ def train_model(exchange) -> dict:
 
     logger.info("ML v2: === TRAINING PIPELINE START ===")
 
-    # ── 1. Fetch multi-timeframe data ──
+    # ── 1. Fetch multi-timeframe data (always from real Binance — testnet has no history) ──
     logger.info("ML v2: Fetching 5000+ candles across 3 timeframes...")
-    df_1h = fetch_ohlcv_paginated(exchange, "BTC/USDT", "1h", total_candles=5000)
+    import ccxt
+    data_exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "spot"}})
+    df_1h = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "1h", total_candles=5000)
     time.sleep(1)
-    df_4h = fetch_ohlcv_paginated(exchange, "BTC/USDT", "4h", total_candles=2000)
+    df_4h = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "4h", total_candles=2000)
     time.sleep(1)
-    df_1d = fetch_ohlcv_paginated(exchange, "BTC/USDT", "1d", total_candles=500)
+    df_1d = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "1d", total_candles=500)
     logger.info("ML v2: Fetched 1h=%d, 4h=%d, 1d=%d candles",
                 len(df_1h), len(df_4h), len(df_1d))
 
