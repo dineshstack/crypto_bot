@@ -99,7 +99,7 @@ async def _on_anomaly(event: ws_stream.AnomalyEvent):
 
     await notify(
         f"{emoji} *{sev}: {sym_label} {_esc(event.event_type.replace('_', ' ').upper())}*\n"
-        f"Price: ${event.price:,.0f}  |  Change: {event.change_pct:+.1f}%\n"
+        f"Price: ${event.price:,.0f}  \\|  Change: {event.change_pct:+.1f}%\n"
         f"_{_esc(event.detail)}_"
     )
 
@@ -120,10 +120,10 @@ def _confirmation_message(decision: dict, snap: dict, port: dict) -> str:
         f"Action:     *{decision['action'].upper()}*\n"
         f"Amount:     *${decision['trade_usd']:.2f}*  ({btc_qty:.6f} BTC)\n"
         f"BTC price:  *${price:,}*\n"
-        f"Confidence: {decision['confidence']:.0%}  |  Risk: {decision['risk']}\n\n"
+        f"Confidence: {decision['confidence']:.0%}  \\|  Risk: {decision['risk']}\n\n"
         f"📊 Signals: `{signals}`\n"
         f"💬 _{decision['reason']}_\n\n"
-        f"RSI {snap['rsi']}  |  F\\&G {snap['fear_greed']}/100 ({snap['fear_greed_lbl']})\n"
+        f"RSI {snap['rsi']}  \\|  F\\&G {snap['fear_greed']}/100 ({snap['fear_greed_lbl']})\n"
         f"Portfolio: ${port['usdt']:.2f} USDT  +  {port['btc']:.6f} BTC\n\n"
         f"⏰ Auto\\-expires in 5 minutes"
     )
@@ -361,9 +361,9 @@ async def run_cycle():
         ml_prob = decision.get("ml_probability")
 
         lines = [
-            f"{emoji} *{decision['action'].upper()}*{_esc(mode)}  |  BTC ${snap['price']:,}",
-            f"RSI {snap['rsi']}  |  F\\&G {snap['fear_greed']}/100 \\({_esc(snap['fear_greed_lbl'])}\\)",
-            f"Portfolio: ${total:.2f}  |  Confidence {decision['confidence']:.0%}",
+            f"{emoji} *{decision['action'].upper()}*{_esc(mode)}  \\|  BTC ${snap['price']:,}",
+            f"RSI {snap['rsi']}  \\|  F\\&G {snap['fear_greed']}/100 \\({_esc(snap['fear_greed_lbl'])}\\)",
+            f"Portfolio: ${total:.2f}  \\|  Confidence {decision['confidence']:.0%}",
             f"💬 _{_esc(decision['reason'])}_",
         ]
         if market_assess:
@@ -377,7 +377,7 @@ async def run_cycle():
         fr = snap.get("funding_rate")
         if fr is not None:
             ls = snap.get("long_short_ratio", "?")
-            lines.append(f"📈 Funding: {fr}%  |  L/S: {ls}")
+            lines.append(f"📈 Funding: {fr}%  \\|  L/S: {ls}")
         if result.get("error"):
             lines.append(f"⚠️ Skipped: {_esc(result['error'])}")
         try:
@@ -459,8 +459,8 @@ async def run_eth_cycle():
         # Notify
         emoji = {"buy": "🟢", "hold": "⚪", "sell": "🔴"}.get(decision["action"], "⚪")
         lines = [
-            f"{emoji} *ETH {decision['action'].upper()}*  |  ETH ${snap['price']:,}",
-            f"RSI {snap['rsi']}  |  Confidence {decision['confidence']:.0%}",
+            f"{emoji} *ETH {decision['action'].upper()}*  \\|  ETH ${snap['price']:,}",
+            f"RSI {snap['rsi']}  \\|  Confidence {decision['confidence']:.0%}",
             f"💬 _{_esc(decision['reason'])}_",
         ]
         market_assess = decision.get("market_assessment", "")
