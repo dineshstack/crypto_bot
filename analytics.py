@@ -78,8 +78,8 @@ def compute_metrics(days: int | None = None) -> dict:
     pnl = 0.0
     pnl_pct = 0.0
     if len(snapshots) >= 2:
-        first = snapshots[0]["total_usd"]
-        last = snapshots[-1]["total_usd"]
+        first = float(snapshots[0]["total_usd"])
+        last = float(snapshots[-1]["total_usd"])
         pnl = last - first
         pnl_pct = (last / first - 1) * 100 if first > 0 else 0
 
@@ -88,7 +88,7 @@ def compute_metrics(days: int | None = None) -> dict:
     max_dd_pct = 0.0
     peak = 0.0
     for s in snapshots:
-        val = s["total_usd"]
+        val = float(s["total_usd"])
         if val > peak:
             peak = val
         if peak > 0:
@@ -109,10 +109,17 @@ def compute_metrics(days: int | None = None) -> dict:
     per_asset = _per_asset_breakdown(actionable)
 
     # Trade frequency
-    total_days = days or ((datetime.now(timezone.utc) - datetime.fromisoformat(
-        snapshots[0]["created_at"].replace("Z", "+00:00")
-    )).days if snapshots else 1)
-    total_days = max(total_days, 1)
+    if days:
+        total_days = days
+    elif snapshots:
+        try:
+            ts = str(snapshots[0]["created_at"]).replace("Z", "+00:00")
+            first_dt = datetime.fromisoformat(ts) if "+" in ts or "T" in ts else datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            total_days = max(1, (datetime.now(timezone.utc) - first_dt).days)
+        except Exception:
+            total_days = 1
+    else:
+        total_days = 1
     trades_per_day = len(actionable) / total_days
 
     return {

@@ -14,9 +14,23 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+
+
+def _clean(obj):
+    """Recursively convert Decimal/datetime to JSON-safe types."""
+    if isinstance(obj, list):
+        return [_clean(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: _clean(v) for k, v in obj.items()}
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    return obj
 
 import config
 import database as db
@@ -60,7 +74,7 @@ def get_snapshots(
     since = None
     if days:
         since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    return db.get_snapshots(limit=limit, since=since)
+    return _clean(db.get_snapshots(limit=limit, since=since))
 
 
 # ── Trades ────────────────────────────────────────────────────────────────────
@@ -77,7 +91,7 @@ def get_trades(
             r["decision"] = json.loads(r["decision"])
         if isinstance(r.get("market"), str):
             r["market"] = json.loads(r["market"])
-    return rows
+    return _clean(rows)
 
 
 @app.get("/api/trades/period")
@@ -88,7 +102,7 @@ def get_trades_period(
     _auth(x_api_key)
     start = datetime.now(timezone.utc) - timedelta(days=days)
     end = datetime.now(timezone.utc)
-    return db.get_trades_in_period(start, end)
+    return _clean(db.get_trades_in_period(start, end))
 
 
 # ── Lessons ───────────────────────────────────────────────────────────────────
@@ -138,7 +152,7 @@ def get_events(
     x_api_key: str = Header(None),
 ):
     _auth(x_api_key)
-    return db.get_events(limit=limit, level=level)
+    return _clean(db.get_events(limit=limit, level=level))
 
 
 # ── Analytics ─────────────────────────────────────────────────────────────────
@@ -149,7 +163,7 @@ def get_analytics(
     x_api_key: str = Header(None),
 ):
     _auth(x_api_key)
-    return analytics.compute_metrics(days)
+    return _clean(analytics.compute_metrics(days))
 
 
 @app.get("/api/analytics/compact")
@@ -177,13 +191,13 @@ def get_research(
             r["risks"] = json.loads(r["risks"])
         if isinstance(r.get("opportunities"), str):
             r["opportunities"] = json.loads(r["opportunities"])
-    return rows
+    return _clean(rows)
 
 
 @app.get("/api/watchlist")
 def get_watchlist(x_api_key: str = Header(None)):
     _auth(x_api_key)
-    return db.get_watchlist()
+    return _clean(db.get_watchlist())
 
 
 # ── Dashboard summary (single call for homepage) ─────────────────────────────
@@ -204,7 +218,7 @@ def get_dashboard(x_api_key: str = Header(None)):
     wrong = len([t for t in actionable if t.get("outcome") == "wrong"])
     win_rate = round(correct / len(actionable) * 100) if actionable else 0
 
-    return {
+    return _clean({
         "snapshots": snapshots,
         "trades": trades[:20],
         "lessons": lessons,
@@ -214,7 +228,7 @@ def get_dashboard(x_api_key: str = Header(None)):
         "wrong": wrong,
         "actionable_count": len(actionable),
         "metrics_7d": metrics,
-    }
+    })
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
