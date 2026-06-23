@@ -338,13 +338,17 @@ def research_coin(detail: dict) -> dict | None:
     Send full coin data to Claude Opus for investment analysis.
     Returns the parsed JSON report dict, or None on failure.
     """
-    circ = detail.get("circulating_supply") or 0
-    total = detail.get("total_supply") or 0
-    max_s = detail.get("max_supply") or 0
+    def _n(val, default=0):
+        """Coerce None to default for safe formatting."""
+        return val if val is not None else default
+
+    circ = _n(detail.get("circulating_supply"))
+    total = _n(detail.get("total_supply"))
+    max_s = _n(detail.get("max_supply"))
     circ_pct = round(circ / total * 100, 1) if total else None
     liq_ratio = (
-        detail["volume_24h_usd"] / detail["market_cap_usd"] * 100
-        if detail.get("market_cap_usd") else 0
+        _n(detail.get("volume_24h_usd")) / _n(detail.get("market_cap_usd"), 1) * 100
+        if _n(detail.get("market_cap_usd")) else 0
     )
 
     categories_str = ", ".join(detail.get("categories", [])) or "Unknown"
@@ -361,14 +365,14 @@ Consensus:   {detail.get('hashing_algorithm') or 'Unknown'}
 {detail.get('description') or 'No description available.'}
 
 ═══ MARKET METRICS ══════════════════════════════════════
-Price:           ${detail.get('price_usd', 0):,.6f}
-Market Cap:      ${detail.get('market_cap_usd', 0):,.0f}  (rank #{detail.get('market_cap_rank', '?')})
-Volume 24h:      ${detail.get('volume_24h_usd', 0):,.0f}
+Price:           ${_n(detail.get('price_usd')):,.6f}
+Market Cap:      ${_n(detail.get('market_cap_usd')):,.0f}  (rank #{detail.get('market_cap_rank') or '?'})
+Volume 24h:      ${_n(detail.get('volume_24h_usd')):,.0f}
 Volume/Cap:      {liq_ratio:.1f}%  (>5% = good liquidity)
-ATH:             ${detail.get('ath_usd', 0):,.4f}  ({detail.get('ath_change_pct', 0):.0f}% from ATH)
-24h change:      {detail.get('change_24h_pct', 0):+.1f}%
-7d change:       {detail.get('change_7d_pct', 0):+.1f}%
-30d change:      {detail.get('change_30d_pct', 0):+.1f}%
+ATH:             ${_n(detail.get('ath_usd')):,.4f}  ({_n(detail.get('ath_change_pct')):.0f}% from ATH)
+24h change:      {_n(detail.get('change_24h_pct')):+.1f}%
+7d change:       {_n(detail.get('change_7d_pct')):+.1f}%
+30d change:      {_n(detail.get('change_30d_pct')):+.1f}%
 
 ═══ TOKENOMICS ══════════════════════════════════════════
 Total supply:     {total:,.0f}
@@ -386,14 +390,14 @@ Issues closed:    {detail.get('github_issues_closed', 0)}
 Direct GH stats:  {json.dumps(detail.get('github_direct', {})) or 'N/A'}
 
 ═══ COMMUNITY ════════════════════════════════════════════
-Twitter followers: {detail.get('twitter_followers', 0):,}  (@{detail.get('twitter') or 'none'})
-Reddit subscribers:{detail.get('reddit_subscribers', 0):,}
-Telegram users:    {detail.get('telegram_users', 0):,}
+Twitter followers: {_n(detail.get('twitter_followers')):,}  (@{detail.get('twitter') or 'none'})
+Reddit subscribers:{_n(detail.get('reddit_subscribers')):,}
+Telegram users:    {_n(detail.get('telegram_users')):,}
 
 ═══ CoinGecko Scores (0–100 each) ═══════════════════════
-Developer score:   {detail.get('developer_score', 0):.1f}
-Community score:   {detail.get('community_score', 0):.1f}
-Liquidity score:   {detail.get('liquidity_score', 0):.1f}
+Developer score:   {_n(detail.get('developer_score')):.1f}
+Community score:   {_n(detail.get('community_score')):.1f}
+Liquidity score:   {_n(detail.get('liquidity_score')):.1f}
 
 ═══ LINKS ════════════════════════════════════════════════
 Website:    {detail.get('homepage') or 'N/A'}
@@ -591,7 +595,7 @@ def format_scan_summary(reports: list[dict]) -> str:
     verdict_emoji = {"buy": "✅", "watch": "👀", "avoid": "❌"}
     lines = ["🔍 *NEW COIN SCAN RESULTS*\n"]
     for i, r in enumerate(reports, 1):
-        cap = r.get("market_cap", 0)
+        cap = r.get("market_cap") or 0
         cap_str = f"${cap/1e6:.1f}M" if cap >= 1e6 else f"${cap/1e3:.0f}K"
         ve = verdict_emoji.get(r.get("verdict", "avoid"), "❓")
         lines.append(
@@ -608,9 +612,9 @@ def format_deep_report(r: dict) -> str:
     verdict_emoji = {"buy": "✅ BUY", "watch": "👀 WATCH", "avoid": "❌ AVOID"}
     verdict_str   = verdict_emoji.get(r.get("verdict", "avoid"), "❓ UNKNOWN")
 
-    cap = r.get("market_cap", 0)
+    cap = r.get("market_cap") or 0
     cap_str = f"${cap/1e6:.1f}M" if cap >= 1e6 else f"${cap/1e3:.0f}K"
-    vol = r.get("volume_24h", 0)
+    vol = r.get("volume_24h") or 0
     vol_str = f"${vol/1e6:.1f}M" if vol >= 1e6 else f"${vol/1e3:.0f}K"
 
     def esc(t: str) -> str:
