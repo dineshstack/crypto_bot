@@ -262,6 +262,43 @@ def get_events(limit: int = 50, level: str = None) -> list[dict]:
     return rows
 
 
+# ── Claude API logs ───────────────────────────────────────────────────────────
+
+def log_claude_call(cycle_id: str, agent: str, model: str,
+                    prompt: str, response: str,
+                    tokens_in: int = 0, tokens_out: int = 0,
+                    duration_ms: int = 0):
+    """Log a Claude API call for the audit trail."""
+    try:
+        _execute(
+            """INSERT INTO claude_api_logs
+               (cycle_id, agent, model, prompt, response, tokens_in, tokens_out, duration_ms)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (cycle_id, agent, model, prompt[:10000], response[:10000],
+             tokens_in, tokens_out, duration_ms),
+        )
+    except Exception as exc:
+        logger.debug("Claude log failed: %s", exc)
+
+
+def get_claude_logs(limit: int = 50, cycle_id: str = None) -> list[dict]:
+    if cycle_id:
+        rows = _execute(
+            "SELECT * FROM claude_api_logs WHERE cycle_id = %s ORDER BY created_at",
+            (cycle_id,),
+            fetch="all",
+        )
+    else:
+        rows = _execute(
+            "SELECT * FROM claude_api_logs ORDER BY created_at DESC LIMIT %s",
+            (limit,),
+            fetch="all",
+        )
+    for r in rows:
+        r["created_at"] = str(r["created_at"])
+    return rows
+
+
 # ── Coin research (used by coin_researcher.py) ───────────────────────────────
 
 def insert_coin_research(data: dict) -> int:

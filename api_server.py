@@ -399,6 +399,19 @@ def get_derivatives(x_api_key: str = Header(None)):
 
 # ── Backtest Runs ────────────────────────────────────────────────────────────
 
+# ── Claude API Logs ──────────────────────────────────────────────────────────
+
+@app.get("/api/claude-logs")
+def get_claude_logs(
+    limit: int = Query(50, le=200),
+    cycle_id: str = Query(None),
+    x_api_key: str = Header(None),
+):
+    """View every prompt sent to Claude and every response back."""
+    _auth(x_api_key)
+    return _clean(db.get_claude_logs(limit=limit, cycle_id=cycle_id))
+
+
 @app.get("/api/backtests")
 def get_backtests(
     limit: int = Query(20),

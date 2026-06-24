@@ -31,6 +31,50 @@ import onchain_macro
 logger = logging.getLogger(__name__)
 
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+_current_cycle_id: str = ""   # set per analysis cycle for log grouping
+
+
+def _call_claude(agent_name: str, system: str, prompt: str,
+                 max_tokens: int = 300, defaults: dict = None) -> dict:
+    """Call Claude API with full logging to MySQL."""
+    import time as _time
+    import uuid
+
+    start = _time.time()
+    try:
+        resp = _client.messages.create(
+            model=config.CLAUDE_MODEL,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        duration = int((_time.time() - start) * 1000)
+
+        db.log_claude_call(
+            cycle_id=_current_cycle_id or str(uuid.uuid4())[:8],
+            agent=agent_name,
+            model=config.CLAUDE_MODEL,
+            prompt=f"[SYSTEM]\n{system[:2000]}\n\n[USER]\n{prompt}",
+            response=raw,
+            tokens_in=resp.usage.input_tokens if resp.usage else 0,
+            tokens_out=resp.usage.output_tokens if resp.usage else 0,
+            duration_ms=duration,
+        )
+
+        return _parse_json(raw, defaults or {})
+    except Exception as exc:
+        duration = int((_time.time() - start) * 1000)
+        db.log_claude_call(
+            cycle_id=_current_cycle_id or "error",
+            agent=agent_name,
+            model=config.CLAUDE_MODEL,
+            prompt=f"[SYSTEM]\n{system[:500]}\n\n[USER]\n{prompt[:500]}",
+            response=f"ERROR: {exc}",
+            duration_ms=duration,
+        )
+        logger.error("%s agent failed: %s", agent_name, exc)
+        return defaults or {}
 
 
 # ── Agent 1: Market Analyst ───────────────────────────────────────────────────
@@ -123,23 +167,11 @@ TIMEFRAME CONSENSUS (1h / 4h / 1d regimes from resampled data):
     if ws_context:
         prompt += f"\n\n{ws_context}"
 
-    try:
-        resp = _client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=300,
-            system=_MARKET_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = resp.content[0].text.strip()
-        return _parse_json(raw, {
-            "trend": "neutral", "strength": "moderate", "volatility": "moderate",
-            "derivatives_bias": "neutral", "key_signals": [], "risk_level": "medium",
-            "summary": "Unable to assess market",
-        })
-    except Exception as exc:
-        logger.error("Market agent failed: %s", exc)
-        return {"trend": "neutral", "strength": "weak", "key_signals": [],
-                "risk_level": "high", "summary": f"Market agent error: {exc}"}
+    return _call_claude("market", _MARKET_SYSTEM, prompt, defaults={
+        "trend": "neutral", "strength": "moderate", "volatility": "moderate",
+        "derivatives_bias": "neutral", "key_signals": [], "risk_level": "medium",
+        "summary": "Unable to assess market",
+    })
 
 
 # ── Agent 2: Sentiment Analyst ────────────────────────────────────────────────
@@ -242,24 +274,12 @@ def _run_sentiment_agent(news_section: str, social_section: str,
 
     prompt = "Analyse this BTC sentiment data:\n\n" + "\n\n".join(parts)
 
-    try:
-        resp = _client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=300,
-            system=_SENTIMENT_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = resp.content[0].text.strip()
-        return _parse_json(raw, {
-            "news_bias": "neutral", "social_bias": "neutral",
-            "onchain_bias": "neutral", "overall_sentiment": "neutral",
-            "confidence": 0.5, "key_factors": [],
-            "summary": "Unable to assess sentiment",
-        })
-    except Exception as exc:
-        logger.error("Sentiment agent failed: %s", exc)
-        return {"overall_sentiment": "neutral", "confidence": 0.3,
-                "key_factors": [], "summary": f"Sentiment agent error: {exc}"}
+    return _call_claude("sentiment", _SENTIMENT_SYSTEM, prompt, defaults={
+        "news_bias": "neutral", "social_bias": "neutral",
+        "onchain_bias": "neutral", "overall_sentiment": "neutral",
+        "confidence": 0.5, "key_factors": [],
+        "summary": "Unable to assess sentiment",
+    })
 
 
 # ── Agent 3: Decision Maker ──────────────────────────────────────────────────
@@ -332,24 +352,11 @@ def _run_decision_agent(market: dict, sentiment: dict,
 {context}
 Base DCA = $5. Suggest $2–$15 depending on opportunity quality."""
 
-    try:
-        resp = _client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=300,
-            system=_DECISION_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = resp.content[0].text.strip()
-        return _parse_json(raw, {
-            "action": "hold", "trade_usd": 0, "confidence": 0.5,
-            "risk": "high", "reason": "Unable to decide — defaulting to hold",
-            "signals": [],
-        })
-    except Exception as exc:
-        logger.error("Decision agent failed: %s", exc)
-        return {"action": "hold", "trade_usd": 0, "confidence": 0,
-                "risk": "high", "reason": f"Decision agent error: {exc}",
-                "signals": []}
+    return _call_claude("decision", _DECISION_SYSTEM, prompt, defaults={
+        "action": "hold", "trade_usd": 0, "confidence": 0.5,
+        "risk": "high", "reason": "Unable to decide — defaulting to hold",
+        "signals": [],
+    })
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -405,7 +412,13 @@ def analyze(snapshot: dict, portfolio: dict, exchange=None) -> dict:
       2. ML model prediction (if trained)
       3. Decision Maker synthesises all assessments
     Returns the final parsed JSON decision dict.
+
+    All Claude API calls are logged to claude_api_logs table for audit.
     """
+    import uuid
+    global _current_cycle_id
+    _current_cycle_id = str(uuid.uuid4())[:8]
+
     price = snapshot["price"]
 
     # Gather data for sentiment agent (these are fast fetches)

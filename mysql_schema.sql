@@ -152,3 +152,20 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     created_at      TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_backtest_created (created_at)
 ) ENGINE=InnoDB;
+
+-- ── Claude API call logs ────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS claude_api_logs (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    cycle_id    VARCHAR(36)    NULL,
+    agent       VARCHAR(30)    NOT NULL,
+    model       VARCHAR(50)    NOT NULL,
+    prompt      TEXT           NOT NULL,
+    response    TEXT           NULL,
+    tokens_in   INT            NOT NULL DEFAULT 0,
+    tokens_out  INT            NOT NULL DEFAULT 0,
+    duration_ms INT            NOT NULL DEFAULT 0,
+    created_at  TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_claude_logs_created (created_at),
+    INDEX idx_claude_logs_cycle (cycle_id),
+    INDEX idx_claude_logs_agent (agent)
+) ENGINE=InnoDB;
