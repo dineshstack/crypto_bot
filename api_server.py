@@ -231,6 +231,118 @@ def get_dashboard(x_api_key: str = Header(None)):
     })
 
 
+# ── Bot Health (circuit breaker state) ────────────────────────────────────────
+
+@app.get("/api/health/bot")
+def get_bot_health(x_api_key: str = Header(None)):
+    """Current risk state: drawdown, daily P&L, consecutive losses, streak."""
+    _auth(x_api_key)
+
+    snapshots = db.get_snapshots(limit=200)
+    trades = db.get_recent_trades(20)
+
+    # Current portfolio value
+    latest_total = float(snapshots[-1]["total_usd"]) if snapshots else 0
+
+    # Session peak + drawdown
+    peak = 0.0
+    for s in snapshots:
+        v = float(s["total_usd"])
+        if v > peak:
+            peak = v
+    drawdown_pct = round((peak - latest_total) / peak * 100, 2) if peak > 0 else 0
+
+    # Daily P&L
+    import datetime as dt
+    today = dt.date.today().isoformat()
+    daily_start = latest_total
+    for s in snapshots:
+        if str(s["created_at"])[:10] == today:
+            daily_start = float(s["total_usd"])
+            break
+    daily_pnl = round(latest_total - daily_start, 2)
+    daily_pnl_pct = round((latest_total / daily_start - 1) * 100, 2) if daily_start > 0 else 0
+
+    # Consecutive losses
+    consec_losses = 0
+    for t in trades:
+        if t.get("outcome") == "wrong":
+            consec_losses += 1
+        elif t.get("outcome") == "correct":
+            break
+
+    # Current streak
+    streak_type = "none"
+    streak_len = 0
+    for t in trades:
+        o = t.get("outcome")
+        if o == "correct":
+            if streak_type == "win":
+                streak_len += 1
+            elif streak_type == "none":
+                streak_type = "win"
+                streak_len = 1
+            else:
+                break
+        elif o == "wrong":
+            if streak_type == "loss":
+                streak_len += 1
+            elif streak_type == "none":
+                streak_type = "loss"
+                streak_len = 1
+            else:
+                break
+
+    # Risk level
+    risk_level = "normal"
+    if drawdown_pct >= 20:
+        risk_level = "halt"
+    elif drawdown_pct >= 10:
+        risk_level = "reduced"
+    elif consec_losses >= 5:
+        risk_level = "paused"
+    elif daily_pnl_pct <= -3:
+        risk_level = "daily_halt"
+    elif drawdown_pct >= 5 or consec_losses >= 3:
+        risk_level = "caution"
+
+    return _clean({
+        "portfolio_usd": latest_total,
+        "session_peak_usd": peak,
+        "drawdown_pct": drawdown_pct,
+        "daily_pnl_usd": daily_pnl,
+        "daily_pnl_pct": daily_pnl_pct,
+        "consecutive_losses": consec_losses,
+        "streak": f"{streak_len} {'win' if streak_type == 'win' else 'loss'}" if streak_type != "none" else "none",
+        "risk_level": risk_level,
+        "thresholds": {
+            "daily_loss_halt": config.DAILY_LOSS_HALT_PCT * 100,
+            "drawdown_reduce": config.DRAWDOWN_REDUCE_PCT * 100,
+            "drawdown_halt": config.DRAWDOWN_HALT_PCT * 100,
+            "consec_loss_halt": config.CONSECUTIVE_LOSS_HALT,
+        },
+    })
+
+
+# ── Single Trade Detail ──────────────────────────────────────────────────────
+
+@app.get("/api/trades/{trade_id}")
+def get_trade_detail(trade_id: int, x_api_key: str = Header(None)):
+    """Full trade detail with all agent reasoning, market data, risk data."""
+    _auth(x_api_key)
+    row = db._execute(
+        "SELECT * FROM trades WHERE id = %s", (trade_id,), fetch="one"
+    )
+    if not row:
+        raise HTTPException(404, "Trade not found")
+    if isinstance(row.get("decision"), str):
+        row["decision"] = json.loads(row["decision"])
+    if isinstance(row.get("market"), str):
+        row["market"] = json.loads(row["market"])
+    row["created_at"] = str(row["created_at"])
+    return _clean(row)
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
