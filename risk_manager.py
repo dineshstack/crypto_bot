@@ -77,28 +77,77 @@ def _get_trade_stats() -> dict:
 
 # ── Kelly Criterion ──────────────────────────────────────────────────────────
 
-def kelly_fraction(win_rate: float, avg_win: float, avg_loss: float) -> float:
+def kelly_fraction(win_rate: float, avg_win: float, avg_loss: float,
+                   total_trades: int = 100) -> float:
     """
     Calculate Kelly fraction: optimal bet size for maximum long-term growth.
     f* = (p * b - q) / b
-    where p = win probability, q = loss probability, b = win/loss ratio
 
-    We use HALF-KELLY (f*/2) for safety — full Kelly is too aggressive for crypto.
+    Uses Quarter-Kelly (f * 0.25) — crypto-appropriate for high volatility.
+    Full Kelly and even Half-Kelly produce dangerously large sizes on BTC/ETH
+    (often 40-120% of account). Quarter-Kelly cuts volatility 75% while
+    retaining ~60% of theoretical long-run growth.
+
+    Win rate is discounted by 10pp to account for overconfidence bias in
+    short trade histories. Strategy must have 50+ trades for reliable inputs.
     """
     if avg_loss <= 0 or win_rate <= 0:
         return 0.0
 
     b = avg_win / avg_loss  # payoff ratio
-    p = win_rate
+    # Discount win rate 10pp to guard against overconfidence / small samples
+    p = max(0.0, win_rate - 0.10)
     q = 1 - p
 
     f = (p * b - q) / b
 
-    # Half-Kelly for safety
-    f = f / 2
+    # Quarter-Kelly — the crypto-standard fractional Kelly for high-vol assets
+    f = f * 0.25
 
-    # Clamp: never risk more than 10% of portfolio, never go negative
-    return max(0.0, min(0.10, f))
+    # Below 50 trades the win-rate estimate is noisy — extra-conservative cap
+    if total_trades < 50:
+        f = min(f, 0.03)
+
+    # Hard cap: never exceed 20% of portfolio regardless of Kelly output
+    return max(0.0, min(0.20, f))
+
+
+# ── Consecutive Loss Detector ────────────────────────────────────────────────
+
+def _get_consecutive_losses() -> int:
+    """Count trailing consecutive 'wrong' outcomes from recent evaluated trades."""
+    trades = db.get_recent_trades(10)
+    count = 0
+    for t in trades:
+        outcome = t.get("outcome")
+        if outcome == "wrong":
+            count += 1
+        elif outcome == "correct":
+            break
+        # trades with no outcome yet (unevaluated) are skipped
+    return count
+
+
+# ── Regime-Aware ATR Stop Multipliers ────────────────────────────────────────
+
+def _atr_stop_multipliers(atr_pct: float, consecutive_losses: int) -> tuple[float, float]:
+    """
+    Return (sl_multiplier, tp_multiplier) tuned to the current volatility regime.
+
+    Rules from 2025-2026 research:
+      Consecutive-loss mode  → tighter stops to limit further damage
+      High vol (ATR > 3%)    → wider stops to avoid premature shake-out
+      Normal (ATR 1.5-3%)    → standard swing multipliers
+      Calm (ATR < 1.5%)      → standard stops, smaller ATR so absolute $ still small
+    """
+    if consecutive_losses >= 3:
+        return 1.5, 2.5   # tighten when bot is underperforming
+    elif atr_pct > 3.0:
+        return 3.0, 4.5   # high volatility — wider stops needed
+    elif atr_pct > 1.5:
+        return 2.0, 3.0   # normal swing trading
+    else:
+        return 1.5, 2.5   # calm market
 
 
 # ── ATR Volatility Scaling ───────────────────────────────────────────────────
@@ -203,7 +252,10 @@ def assess_trade(action: str, confidence: float, snapshot: dict,
 
     # 1. Get trade statistics for Kelly
     stats = _get_trade_stats()
-    kf = kelly_fraction(stats["win_rate"], stats["avg_win_pct"], stats["avg_loss_pct"])
+    kf = kelly_fraction(
+        stats["win_rate"], stats["avg_win_pct"], stats["avg_loss_pct"],
+        total_trades=stats["total_trades"],
+    )
 
     # 2. ATR volatility scaling
     atr_scale = atr_scale_factor(atr_pct)
@@ -239,12 +291,15 @@ def assess_trade(action: str, confidence: float, snapshot: dict,
     # 7. Clamp to config limits
     final_usd = max(config.MIN_TRADE_USD, min(config.MAX_TRADE_USD, sized_usd))
 
-    # 8. Calculate stops
-    stops = calculate_stops(price, atr, action)
+    # 8. Regime-aware stops
+    consec_losses = _get_consecutive_losses()
+    sl_mult, tp_mult = _atr_stop_multipliers(atr_pct, consec_losses)
+    stops = calculate_stops(price, atr, action,
+                            sl_multiplier=sl_mult, tp_multiplier=tp_mult)
 
     rationale_parts = [
-        f"Kelly={kf:.1%} (WR={stats['win_rate']:.0%}, {stats['total_trades']} trades)",
-        f"ATR={atr_pct:.1f}%→{atr_scale:.1f}x",
+        f"Kelly={kf:.1%} (WR={stats['win_rate']:.0%}→{max(0,stats['win_rate']-0.10):.0%} disc, {stats['total_trades']} trades)",
+        f"ATR={atr_pct:.1f}%→{atr_scale:.1f}x (stops {sl_mult}×/{tp_mult}×)",
         f"Conf={confidence:.0%}→{conf_scale:.1f}x",
         f"RL={rl_action}→{rl_scale:.1f}x",
         f"Base=${kelly_usd:.1f}→Final=${final_usd:.1f}",

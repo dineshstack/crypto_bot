@@ -26,12 +26,102 @@ def get_exchange() -> ccxt.binance:
 
 
 def get_fear_greed() -> dict:
+    """
+    Fetch Fear & Greed index with 30-day history from alternative.me (free, no key).
+    Returns current value, label, 7-day trend direction, and 7-day average.
+    Trend context is more useful to Claude than the point-in-time value alone.
+    """
     try:
-        r = requests.get("https://api.alternative.me/fng/", timeout=5)
-        d = r.json()["data"][0]
-        return {"value": int(d["value"]), "label": d["value_classification"]}
+        r = requests.get("https://api.alternative.me/fng/?limit=30", timeout=5)
+        data = r.json()["data"]
+        current = data[0]
+
+        recent_7 = [int(d["value"]) for d in data[:7]]
+        older_7  = [int(d["value"]) for d in data[7:14]] if len(data) >= 14 else recent_7
+        avg_recent = sum(recent_7) / len(recent_7)
+        avg_older  = sum(older_7)  / len(older_7)
+
+        if avg_recent > avg_older + 3:
+            trend = "rising"        # sentiment improving
+        elif avg_recent < avg_older - 3:
+            trend = "falling"       # sentiment deteriorating
+        else:
+            trend = "flat"
+
+        return {
+            "value":    int(current["value"]),
+            "label":    current["value_classification"],
+            "trend_7d": trend,
+            "avg_7d":   round(avg_recent, 1),
+        }
     except Exception:
-        return {"value": 50, "label": "Neutral"}
+        return {"value": 50, "label": "Neutral", "trend_7d": "flat", "avg_7d": 50}
+
+
+def _regime_from_series(closes: pd.Series) -> str:
+    """Classify a price series as bullish / bearish / neutral using RSI + SMA cross."""
+    n = len(closes)
+    if n < 21:
+        return "neutral"
+    w14 = min(14, n - 1)
+    w20 = min(20, n - 1)
+    w50 = min(50, n - 1)
+    rsi_val = RSIIndicator(closes, window=w14).rsi().iloc[-1]
+    sma20   = SMAIndicator(closes, window=w20).sma_indicator().iloc[-1]
+    sma50   = SMAIndicator(closes, window=w50).sma_indicator().iloc[-1]
+    price   = closes.iloc[-1]
+    bull = sum([rsi_val > 52, price > sma20, sma20 > sma50])
+    bear = sum([rsi_val < 48, price < sma20, sma20 < sma50])
+    if bull >= 2:
+        return "bullish"
+    if bear >= 2:
+        return "bearish"
+    return "neutral"
+
+
+def compute_timeframe_consensus(df: pd.DataFrame) -> dict:
+    """
+    Derive regime agreement across 1h, 4h, and 1d by resampling the 168-candle
+    1h DataFrame already fetched in get_market_snapshot.
+
+    Returns:
+      tf_regime_1h/4h/1d  — individual regime labels
+      tf_direction        — 'bullish' | 'bearish' | 'mixed'
+      tf_agreement        — how many of the 3 timeframes agree (0-3)
+    """
+    df_idx = df.copy()
+    df_idx.index = pd.to_datetime(df_idx["ts"], unit="ms")
+
+    regime_1h = _regime_from_series(df_idx["close"])
+
+    df_4h = df_idx.resample("4h").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    ).dropna()
+    regime_4h = _regime_from_series(df_4h["close"])
+
+    df_1d = df_idx.resample("1D").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    ).dropna()
+    regime_1d = _regime_from_series(df_1d["close"])
+
+    regimes = [regime_1h, regime_4h, regime_1d]
+    bull_count = regimes.count("bullish")
+    bear_count = regimes.count("bearish")
+
+    if bull_count >= 2:
+        direction, agreement = "bullish", bull_count
+    elif bear_count >= 2:
+        direction, agreement = "bearish", bear_count
+    else:
+        direction, agreement = "mixed", max(bull_count, bear_count)
+
+    return {
+        "tf_regime_1h":  regime_1h,
+        "tf_regime_4h":  regime_4h,
+        "tf_regime_1d":  regime_1d,
+        "tf_direction":  direction,
+        "tf_agreement":  agreement,
+    }
 
 
 def get_market_snapshot(exchange: ccxt.binance) -> dict:
@@ -92,8 +182,10 @@ def get_market_snapshot(exchange: ccxt.binance) -> dict:
         "bb_lower":       round(bb.bollinger_lband().iloc[-1], 2),
         "vs_sma20_pct":   round((price / sma20.iloc[-1] - 1) * 100, 2),
         "vs_sma50_pct":   round((price / sma50.iloc[-1] - 1) * 100, 2),
-        "fear_greed":     fg["value"],
-        "fear_greed_lbl": fg["label"],
+        "fear_greed":       fg["value"],
+        "fear_greed_lbl":   fg["label"],
+        "fear_greed_trend": fg["trend_7d"],
+        "fear_greed_avg7d": fg["avg_7d"],
         # MACD
         "macd":           round(macd_ind.macd().iloc[-1], 2),
         "macd_signal":    round(macd_ind.macd_signal().iloc[-1], 2),
@@ -114,6 +206,9 @@ def get_market_snapshot(exchange: ccxt.binance) -> dict:
         # Ichimoku
         "ichimoku_signal": ichimoku_signal,
     }
+
+    # Multi-timeframe regime consensus (uses the same df already in memory)
+    snap.update(compute_timeframe_consensus(df))
 
     # Derivatives data (funding rate, open interest, long/short ratio)
     oi_btc = deriv["open_interest_btc"]

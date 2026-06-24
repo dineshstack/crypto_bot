@@ -66,6 +66,12 @@ MAX_BTC_ALLOC_PCT  = 0.60   # Stop buying if BTC > 60% of portfolio
 MAX_TOTAL_CRYPTO_PCT = 0.80 # Max total crypto allocation (BTC+ETH) = 80%
 STOP_LOSS_PCT      = 0.09   # Pause bot if total portfolio drops 9%
 
+# Circuit breaker thresholds (Phase-1 risk improvements)
+DAILY_LOSS_HALT_PCT   = 0.03  # Pause for the day if portfolio drops 3% intraday
+DRAWDOWN_REDUCE_PCT   = 0.10  # Halve position sizing at 10% drawdown from session peak
+DRAWDOWN_HALT_PCT     = 0.20  # Full halt at 20% drawdown from session peak
+CONSECUTIVE_LOSS_HALT = 5     # Pause after 5 consecutive losing trades
+
 # Bot behaviour
 ANALYSIS_INTERVAL_HOURS = 4   # Run Claude analysis every 4 hours
 

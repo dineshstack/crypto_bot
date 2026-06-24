@@ -30,6 +30,7 @@ Telegram commands (coin research):
   /help     — full command list
 """
 import asyncio
+import datetime
 import logging
 import sys
 import uuid as uuid_mod
@@ -81,6 +82,131 @@ _emergency_event: asyncio.Event | None = None  # set by anomaly detector to wake
 
 # Pending live-trade confirmations: conf_id → (asyncio.Event, {"approved": bool})
 _pending: dict[str, tuple[asyncio.Event, dict]] = {}
+
+# ── Circuit-breaker state ──────────────────────────────────────────────────
+_session_peak_usd: float | None = None   # highest portfolio value since /start
+_daily_start_usd:  float | None = None   # portfolio at start of current calendar day
+_daily_date:       str          = ""     # ISO date when _daily_start_usd was recorded
+_sizing_scale:     float        = 1.0    # position-size multiplier (halved at 10% drawdown)
+
+
+# ── Circuit-breaker helpers ────────────────────────────────────────────────
+
+def _count_consecutive_losses() -> int:
+    """Count trailing consecutive 'wrong' outcomes from the most recent trades."""
+    trades = db.get_recent_trades(10)
+    count = 0
+    for t in trades:
+        outcome = t.get("outcome")
+        if outcome == "wrong":
+            count += 1
+        elif outcome == "correct":
+            break
+        # trades with no outcome yet (unevaluated) are skipped
+    return count
+
+
+async def _check_circuit_breakers(total: float) -> bool:
+    """
+    Evaluate all five circuit-breaker conditions against the current portfolio value.
+
+    Returns True  → trading may proceed (sizing scale may be adjusted).
+    Returns False → bot paused; run_cycle should return immediately.
+
+    Mutates: bot_active, _sizing_scale, _session_peak_usd,
+             _daily_start_usd, _daily_date
+    """
+    global bot_active, _session_peak_usd, _daily_start_usd, _daily_date, _sizing_scale
+
+    today = datetime.date.today().isoformat()
+
+    # Reset daily baseline at the start of each calendar day
+    if _daily_date != today:
+        _daily_start_usd = total
+        _daily_date = today
+        logger.info("Circuit breakers: new day — daily baseline $%.2f", total)
+
+    # Track session peak for drawdown calculation
+    if _session_peak_usd is None or total > _session_peak_usd:
+        _session_peak_usd = total
+
+    # 1. Daily loss gate — 3% intraday drop pauses trading for the rest of the day
+    if _daily_start_usd and total < _daily_start_usd * (1 - config.DAILY_LOSS_HALT_PCT):
+        daily_loss_pct = (_daily_start_usd - total) / _daily_start_usd * 100
+        logger.warning("Circuit breaker: daily loss %.1f%% — pausing bot", daily_loss_pct)
+        db.log_event("circuit_breaker", f"Daily loss {daily_loss_pct:.1f}%", "warning",
+                     {"daily_start": _daily_start_usd, "current": total})
+        bot_active = False
+        await notify(
+            f"⚠️ *Daily loss gate triggered*\n"
+            f"Down {daily_loss_pct:.1f}% today "
+            f"\\(${_daily_start_usd:.2f} → ${total:.2f}\\)\\.\n"
+            f"Trading paused for the rest of today\\. Use /start tomorrow\\."
+        )
+        return False
+
+    # 2. Consecutive loss gate — 5 straight losses means strategy needs review
+    consec = _count_consecutive_losses()
+    if consec >= config.CONSECUTIVE_LOSS_HALT:
+        logger.warning("Circuit breaker: %d consecutive losses — pausing bot", consec)
+        db.log_event("circuit_breaker", f"Consecutive losses: {consec}", "warning")
+        bot_active = False
+        await notify(
+            f"⚠️ *Consecutive loss gate triggered*\n"
+            f"{consec} losses in a row\\.\n"
+            f"Bot paused — review strategy, then /start to resume\\."
+        )
+        return False
+
+    # 3 & 4. Drawdown gates — measured from session peak
+    drawdown = (_session_peak_usd - total) / _session_peak_usd if _session_peak_usd else 0.0
+
+    if drawdown >= config.DRAWDOWN_HALT_PCT:
+        logger.warning("Circuit breaker: critical drawdown %.1f%% — halting bot", drawdown * 100)
+        db.log_event("circuit_breaker", f"Critical drawdown {drawdown:.1%}", "warning",
+                     {"peak": _session_peak_usd, "current": total})
+        bot_active = False
+        await notify(
+            f"⛔ *Critical drawdown halt*\n"
+            f"{drawdown:.1%} drawdown from session peak "
+            f"\\(${_session_peak_usd:.2f} → ${total:.2f}\\)\\.\n"
+            f"Bot halted\\. Use /start to resume after reviewing\\."
+        )
+        return False
+
+    if drawdown >= config.DRAWDOWN_REDUCE_PCT:
+        if _sizing_scale != 0.5:
+            _sizing_scale = 0.5
+            logger.warning("Circuit breaker: %.1f%% drawdown — position sizing halved", drawdown * 100)
+            db.log_event("circuit_breaker", f"Sizing halved — {drawdown:.1%} drawdown", "warning")
+            await notify(
+                f"⚠️ *Position sizing reduced 50%*\n"
+                f"{drawdown:.1%} drawdown from session peak\\.\n"
+                f"Trading continues at half\\-size until portfolio recovers\\."
+            )
+    else:
+        # Recovered above the reduce threshold — restore full sizing
+        if _sizing_scale != 1.0:
+            _sizing_scale = 1.0
+            logger.info("Circuit breakers: drawdown recovered — full sizing restored")
+
+    # 5. Equity MA gate — below 20-snapshot rolling average means equity is trending down
+    try:
+        snaps = db.get_snapshots(limit=20)
+        if len(snaps) >= 20:
+            equity_ma = sum(s["total_usd"] for s in snaps) / len(snaps)
+            if total < equity_ma * 0.99 and _sizing_scale == 1.0:
+                _sizing_scale = 0.5
+                logger.info(
+                    "Circuit breaker: equity $%.2f below 20-snapshot MA $%.2f — sizing at 50%%",
+                    total, equity_ma,
+                )
+                db.log_event("circuit_breaker",
+                             f"Equity below MA: ${total:.2f} < ${equity_ma:.2f}", "info")
+    except Exception:
+        pass  # non-fatal — snapshots may not exist yet
+
+    return True
 
 
 # ── WebSocket anomaly handler ──────────────────────────────────────────────
@@ -280,11 +406,16 @@ async def run_cycle():
 
         total = db.save_snapshot(port["usdt"], port["btc"], snap["price"])
         logger.info(
-            "BTC $%,.0f | RSI %.0f | F&G %s | Portfolio $%.2f",
-            snap["price"], snap["rsi"], snap["fear_greed"], total,
+            "BTC $%,.0f | RSI %.0f | F&G %s | TF=%s(%d/3) | Portfolio $%.2f",
+            snap["price"], snap["rsi"], snap["fear_greed"],
+            snap.get("tf_direction", "?"), snap.get("tf_agreement", 0), total,
         )
 
-        # Stop-loss guard
+        # Circuit-breaker checks (daily loss, consecutive losses, drawdown, equity MA)
+        if not await _check_circuit_breakers(total):
+            return
+
+        # Stop-loss guard (legacy — kept for backward compatibility)
         if baseline_usd and total < baseline_usd * (1 - config.STOP_LOSS_PCT):
             msg = (
                 f"⛔ *Stop\\-loss triggered\\!*\n"
@@ -323,6 +454,40 @@ async def run_cycle():
 
         # Ask Claude multi-agent pipeline (market + sentiment + ML → decision)
         decision = claude_analyzer.analyze(snap, port, exchange=exchange)
+
+        # Timeframe consensus gate — block directional trades when < 2/3 timeframes agree
+        tf_direction = snap.get("tf_direction", "mixed")
+        tf_agreement = snap.get("tf_agreement", 0)
+        if decision["action"] in ("buy", "sell") and tf_agreement < 2:
+            # Only block if the agreed direction contradicts or doesn't support the trade
+            action_dir = "bullish" if decision["action"] == "buy" else "bearish"
+            if tf_direction != action_dir:
+                original_action = decision["action"]
+                decision["action"] = "hold"
+                decision["reason"] = (
+                    f"Timeframe gate: only {tf_agreement}/3 timeframes agree ({tf_direction}) "
+                    f"— {original_action} blocked. Original: {decision['reason']}"
+                )
+                logger.info(
+                    "Timeframe gate: blocked %s — %d/3 TFs agree, direction=%s",
+                    original_action, tf_agreement, tf_direction,
+                )
+                db.log_event("timeframe_gate",
+                             f"Blocked {original_action}: {tf_agreement}/3 agree, {tf_direction}",
+                             data={"tf_1h": snap.get("tf_regime_1h"),
+                                   "tf_4h": snap.get("tf_regime_4h"),
+                                   "tf_1d": snap.get("tf_regime_1d")})
+
+        # Apply circuit-breaker sizing scale (0.5 when in drawdown / equity below MA)
+        if _sizing_scale < 1.0 and decision["action"] in ("buy", "sell"):
+            original_usd = decision.get("trade_usd", 0)
+            decision["trade_usd"] = max(
+                config.MIN_TRADE_USD, round(original_usd * _sizing_scale, 2)
+            )
+            logger.info(
+                "Sizing scale %.0f%% applied: $%.2f → $%.2f",
+                _sizing_scale * 100, original_usd, decision["trade_usd"],
+            )
 
         # In LIVE mode, get human approval before any buy/sell
         if not config.TESTNET and decision["action"] in ("buy", "sell"):
@@ -564,6 +729,13 @@ async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     port = md.get_portfolio(exchange)
     snap = md.get_market_snapshot(exchange)
     baseline_usd = port["usdt"] + port["btc"] * snap["price"]
+
+    # Initialise circuit-breaker baselines for this session
+    global _session_peak_usd, _daily_start_usd, _daily_date, _sizing_scale
+    _session_peak_usd = baseline_usd
+    _daily_start_usd  = baseline_usd
+    _daily_date       = datetime.date.today().isoformat()
+    _sizing_scale     = 1.0
 
     # Start WebSocket real-time streams + anomaly detection
     ws_stream.on_anomaly(_on_anomaly)
