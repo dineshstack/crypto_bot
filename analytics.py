@@ -155,8 +155,8 @@ def _compute_daily_returns(snapshots: list[dict]) -> list[float]:
 
     by_day: dict[str, float] = {}
     for s in snapshots:
-        day = s["created_at"][:10]
-        by_day[day] = s["total_usd"]
+        day = str(s["created_at"])[:10]
+        by_day[day] = float(s["total_usd"])
 
     days = sorted(by_day.keys())
     returns = []
@@ -164,7 +164,7 @@ def _compute_daily_returns(snapshots: list[dict]) -> list[float]:
         prev = by_day[days[i - 1]]
         curr = by_day[days[i]]
         if prev > 0:
-            returns.append((curr / prev - 1))
+            returns.append(float(curr / prev - 1))
     return returns
 
 
