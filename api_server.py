@@ -412,6 +412,37 @@ def get_claude_logs(
     return _clean(db.get_claude_logs(limit=limit, cycle_id=cycle_id))
 
 
+# ── Coin Screening ───────────────────────────────────────────────────────────
+
+@app.get("/api/screening")
+def get_screening(x_api_key: str = Header(None)):
+    """Latest coin screening results (top 50 by momentum)."""
+    _auth(x_api_key)
+    import coin_screener
+    return _clean(coin_screener.get_latest_screening())
+
+
+@app.get("/api/screening/run")
+def run_screening(x_api_key: str = Header(None)):
+    """Trigger a new screening scan."""
+    _auth(x_api_key)
+    import coin_screener
+    results = coin_screener.run_screening(50)
+    return _clean({"count": len(results), "top": results[:5] if results else []})
+
+
+# ── Market Reports ───────────────────────────────────────────────────────────
+
+@app.get("/api/reports")
+def get_reports(
+    limit: int = Query(10),
+    x_api_key: str = Header(None),
+):
+    _auth(x_api_key)
+    import report_generator
+    return _clean(report_generator.get_latest_reports(limit))
+
+
 @app.get("/api/backtests")
 def get_backtests(
     limit: int = Query(20),

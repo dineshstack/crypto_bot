@@ -169,3 +169,60 @@ CREATE TABLE IF NOT EXISTS claude_api_logs (
     INDEX idx_claude_logs_cycle (cycle_id),
     INDEX idx_claude_logs_agent (agent)
 ) ENGINE=InnoDB;
+
+-- ── Coin screening results (daily top-50 scan) ─────────────────────────────
+CREATE TABLE IF NOT EXISTS coin_screenings (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    scan_date       DATE           NOT NULL,
+    coin_id         VARCHAR(100)   NOT NULL,
+    symbol          VARCHAR(20)    NOT NULL,
+    name            VARCHAR(100)   NULL,
+    price_usd       DECIMAL(20,8)  NOT NULL DEFAULT 0,
+    market_cap      DECIMAL(20,2)  NOT NULL DEFAULT 0,
+    volume_24h      DECIMAL(20,2)  NOT NULL DEFAULT 0,
+    change_24h_pct  DECIMAL(10,2)  NULL,
+    change_7d_pct   DECIMAL(10,2)  NULL,
+    change_30d_pct  DECIMAL(10,2)  NULL,
+    momentum_score  INT            NOT NULL DEFAULT 0,
+    risk_tier       VARCHAR(10)    NOT NULL DEFAULT 'tier3',
+    category        VARCHAR(100)   NULL,
+    sparkline_7d    JSON           NULL,
+    created_at      TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_screening_date (scan_date),
+    INDEX idx_screening_symbol (symbol),
+    UNIQUE KEY uq_screening_date_coin (scan_date, coin_id)
+) ENGINE=InnoDB;
+
+-- ── Market reports (weekly/monthly advisory reports) ────────────────────────
+CREATE TABLE IF NOT EXISTS market_reports (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_type     VARCHAR(20)    NOT NULL DEFAULT 'weekly',
+    period_start    DATE           NULL,
+    period_end      DATE           NULL,
+    title           VARCHAR(200)   NULL,
+    summary         TEXT           NULL,
+    market_overview TEXT           NULL,
+    top_signals     JSON           NULL,
+    sector_data     JSON           NULL,
+    outlook         TEXT           NULL,
+    portfolio_perf  JSON           NULL,
+    raw_data        JSON           NULL,
+    created_at      TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_report_created (created_at),
+    INDEX idx_report_type (report_type)
+) ENGINE=InnoDB;
+
+-- ── Narrative/sector tracking ───────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS narrative_tracking (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    scan_date       DATE           NOT NULL,
+    narrative       VARCHAR(100)   NOT NULL,
+    market_cap      DECIMAL(20,2)  NOT NULL DEFAULT 0,
+    change_24h_pct  DECIMAL(10,2)  NULL,
+    change_7d_pct   DECIMAL(10,2)  NULL,
+    top_coins       JSON           NULL,
+    coin_count      INT            NOT NULL DEFAULT 0,
+    created_at      TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_narrative_date (scan_date),
+    UNIQUE KEY uq_narrative_date (scan_date, narrative)
+) ENGINE=InnoDB;

@@ -60,6 +60,9 @@ import multi_asset
 import analytics
 import grid_dca
 import rl_position
+import coin_screener
+import report_generator
+import thesis_generator
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -1013,6 +1016,93 @@ async def cmd_performance(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Analytics error: {e}")
 
 
+async def cmd_screen(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
+    """Scan top 50 coins and rank by momentum score."""
+    if not _auth(update):
+        return
+    await update.message.reply_text("📊 Scanning top 50 coins by momentum...")
+    loop = asyncio.get_event_loop()
+    try:
+        results = await loop.run_in_executor(None, coin_screener.run_screening, 50)
+        msg = coin_screener.format_screening_telegram(results)
+        await update.message.reply_text(msg, parse_mode="MarkdownV2")
+    except Exception as e:
+        await update.message.reply_text(f"Screening error: {e}")
+
+
+async def cmd_report(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
+    """Generate weekly market report with Claude Opus."""
+    if not _auth(update):
+        return
+    args = _ctx.args or []
+    days = 7
+    if args:
+        try:
+            days = int(args[0])
+        except ValueError:
+            pass
+
+    await update.message.reply_text(f"📊 Generating {days}-day market report with Claude Opus (may take ~60s)...")
+    loop = asyncio.get_event_loop()
+    try:
+        report = await loop.run_in_executor(None, report_generator.generate_report, days, "weekly" if days <= 7 else "monthly")
+        if report.get("content"):
+            content = report["content"]
+            # Split if too long for Telegram
+            if len(content) > 4000:
+                await update.message.reply_text(content[:4000])
+                await update.message.reply_text(content[4000:8000])
+            else:
+                await update.message.reply_text(content)
+        else:
+            await update.message.reply_text("Report generation failed — check logs.")
+    except Exception as e:
+        await update.message.reply_text(f"Report error: {e}")
+
+
+async def cmd_thesis(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
+    """Generate investment thesis for any coin: /thesis SOL or /thesis SOL 5000"""
+    if not _auth(update):
+        return
+    args = _ctx.args or []
+    if not args:
+        await update.message.reply_text("Usage: /thesis <symbol> [portfolio_size]\nExample: /thesis SOL 10000")
+        return
+
+    query = args[0].strip()
+    portfolio_size = 10000
+    if len(args) > 1:
+        try:
+            portfolio_size = float(args[1])
+        except ValueError:
+            pass
+
+    await update.message.reply_text(f"🔬 Generating investment thesis for *{query.upper()}* (portfolio: ${portfolio_size:,.0f})...\nThis uses Claude Opus and takes ~60s.", parse_mode="Markdown")
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(None, thesis_generator.generate_thesis, query, portfolio_size)
+        if not result:
+            await update.message.reply_text(f"Coin '{query}' not found on CoinGecko.")
+            return
+        if result.get("error"):
+            await update.message.reply_text(f"Thesis error: {result['error']}")
+            return
+
+        thesis = result["thesis"]
+        header = f"📋 *Investment Thesis — {result['symbol']}*\n{result['name']} | ${result.get('price', 0):,.4f} | Cap: ${(result.get('market_cap') or 0)/1e9:.1f}B\n\n"
+
+        # Split if too long
+        full = header + thesis
+        if len(full) > 4000:
+            await update.message.reply_text(full[:4000], parse_mode="Markdown")
+            if len(thesis) > 3800:
+                await update.message.reply_text(thesis[3800:7600])
+        else:
+            await update.message.reply_text(full, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"Thesis error: {e}")
+
+
 async def cmd_help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     if not _auth(update):
         return
@@ -1030,6 +1120,12 @@ async def cmd_help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
         "/newcoins          — scan & score new/trending coins\n"
         "/research <symbol> — deep-dive any specific coin\n"
         "/watchlist         — view saved investment watchlist\n\n"
+        "📊 *Advisory Tools*\n"
+        "/screen            — scan top 50 coins by momentum\n"
+        "/report            — generate weekly market report\n"
+        "/report 30         — generate 30-day report\n"
+        "/thesis <symbol>   — full investment thesis\n"
+        "/thesis SOL 5000   — thesis for $5K portfolio\n\n"
         "/help     — this message",
         parse_mode="Markdown",
     )
@@ -1076,6 +1172,10 @@ def main():
     tg_app.add_handler(CommandHandler("newcoins",  cmd_newcoins))
     tg_app.add_handler(CommandHandler("research",  cmd_research))
     tg_app.add_handler(CommandHandler("watchlist", cmd_watchlist))
+    # Advisory tools
+    tg_app.add_handler(CommandHandler("screen",    cmd_screen))
+    tg_app.add_handler(CommandHandler("report",    cmd_report))
+    tg_app.add_handler(CommandHandler("thesis",    cmd_thesis))
     tg_app.add_handler(CommandHandler("help",      cmd_help))
     tg_app.add_handler(CallbackQueryHandler(handle_callback))
 
