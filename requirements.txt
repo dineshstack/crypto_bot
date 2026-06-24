@@ -17,3 +17,4 @@ optuna>=4.0.0
 BorutaShap>=1.0.0
 yfinance>=0.2.40
 websockets>=13.0
+hmmlearn>=0.3.0

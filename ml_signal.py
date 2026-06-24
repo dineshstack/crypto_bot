@@ -225,31 +225,205 @@ def engineer_features(df_1h: pd.DataFrame, df_4h: pd.DataFrame = None,
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4. MARKET REGIME DETECTION
+# 4. MARKET REGIME DETECTION — HMM + Rules Hybrid (5 states)
 # ═══════════════════════════════════════════════════════════════════════════════
+#
+# 5 regimes: strong_trend, weak_trend, range, high_vol, crash
+#
+# Step 1: Compute feature matrix (returns, ADX, ATR percentile, BB width)
+# Step 2: Fit Gaussian HMM (unsupervised — learns clusters from data)
+# Step 3: Map HMM states to named regimes via cluster centroids
+# Step 4: Apply persistence filter (3-bar confirmation before regime switch)
+# Step 5: Fallback to rule-based if HMM fails or too little data
+
+REGIME_LABELS = ["strong_trend", "weak_trend", "range", "high_vol", "crash"]
+PERSISTENCE_BARS = 3  # consecutive bars needed to confirm a regime switch
+
+
+def _compute_regime_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Build the feature matrix for regime classification."""
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+
+    features = pd.DataFrame(index=df.index)
+
+    # 1. Returns (momentum)
+    features["return_12h"] = close.pct_change(12)
+    features["return_24h"] = close.pct_change(24)
+
+    # 2. ADX (trend strength) — approximated via directional movement
+    atr = AverageTrueRange(high, low, close, window=14).average_true_range()
+    plus_dm = high.diff().clip(lower=0)
+    minus_dm = (-low.diff()).clip(lower=0)
+    plus_di = 100 * (plus_dm.rolling(14).mean() / atr)
+    minus_di = 100 * (minus_dm.rolling(14).mean() / atr)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)) * 100
+    features["adx"] = dx.rolling(14).mean()
+
+    # 3. ATR percentile (volatility relative to recent history)
+    atr_pct = atr / close * 100
+    features["atr_pct"] = atr_pct
+    features["atr_percentile"] = atr_pct.rolling(168).rank(pct=True)  # 7-day percentile
+
+    # 4. Bollinger Band width (squeeze detection)
+    bb = BollingerBands(close, window=20, window_dev=2)
+    bb_upper = bb.bollinger_hband()
+    bb_lower = bb.bollinger_lband()
+    features["bb_width"] = (bb_upper - bb_lower) / close
+
+    return features.dropna()
+
+
+def _fit_hmm_regimes(features: pd.DataFrame, n_states: int = 5) -> pd.Series:
+    """Fit a Gaussian HMM and return regime labels."""
+    try:
+        from hmmlearn.hmm import GaussianHMM
+    except ImportError:
+        logger.debug("hmmlearn not installed — using rule-based regimes")
+        return pd.Series(dtype=str)
+
+    X = features[["return_24h", "adx", "atr_percentile", "bb_width"]].values
+    if len(X) < 100:
+        return pd.Series(dtype=str)
+
+    try:
+        model = GaussianHMM(
+            n_components=n_states,
+            covariance_type="full",
+            n_iter=100,
+            random_state=42,
+        )
+        model.fit(X)
+        hidden_states = model.predict(X)
+    except Exception as exc:
+        logger.debug("HMM fitting failed: %s", exc)
+        return pd.Series(dtype=str)
+
+    # Map HMM states to named regimes by centroid characteristics
+    centroids = model.means_
+    state_map = {}
+    for i in range(n_states):
+        ret = centroids[i][0]       # return_24h
+        adx = centroids[i][1]       # adx
+        atr_pctl = centroids[i][2]  # atr_percentile
+        bb_w = centroids[i][3]      # bb_width
+
+        if ret < -0.02 and atr_pctl > 0.7:
+            state_map[i] = "crash"
+        elif adx > 30 and abs(ret) > 0.005:
+            state_map[i] = "strong_trend"
+        elif adx > 20:
+            state_map[i] = "weak_trend"
+        elif atr_pctl > 0.75:
+            state_map[i] = "high_vol"
+        else:
+            state_map[i] = "range"
+
+    # Ensure all 5 labels are used (dedup: assign unclaimed labels to closest)
+    used = set(state_map.values())
+    for label in REGIME_LABELS:
+        if label not in used:
+            # Assign to the state with no label yet, or override least confident
+            for i in range(n_states):
+                if i not in state_map:
+                    state_map[i] = label
+                    break
+
+    regimes = pd.Series(
+        [state_map.get(s, "range") for s in hidden_states],
+        index=features.index,
+    )
+    return regimes
+
+
+def _apply_persistence_filter(regimes: pd.Series, min_bars: int = PERSISTENCE_BARS) -> pd.Series:
+    """Only switch regime after min_bars consecutive bars confirm the new state."""
+    if regimes.empty:
+        return regimes
+
+    filtered = regimes.copy()
+    current = regimes.iloc[0]
+    pending = None
+    pending_count = 0
+
+    for i in range(1, len(regimes)):
+        raw = regimes.iloc[i]
+        if raw == current:
+            pending = None
+            pending_count = 0
+            filtered.iloc[i] = current
+        elif raw == pending:
+            pending_count += 1
+            if pending_count >= min_bars:
+                current = pending
+                filtered.iloc[i] = current
+                pending = None
+                pending_count = 0
+            else:
+                filtered.iloc[i] = current
+        else:
+            pending = raw
+            pending_count = 1
+            filtered.iloc[i] = current
+
+    return filtered
+
 
 def detect_regime(df: pd.DataFrame) -> pd.Series:
+    """
+    Detect market regime using HMM + persistence filter.
+    Falls back to rule-based classification if HMM fails.
+    """
+    features = _compute_regime_features(df)
+
+    # Try HMM first
+    hmm_regimes = _fit_hmm_regimes(features)
+
+    if not hmm_regimes.empty and len(hmm_regimes) > 50:
+        filtered = _apply_persistence_filter(hmm_regimes)
+        # Reindex to original df index
+        result = pd.Series("range", index=df.index)
+        result.loc[filtered.index] = filtered
+        logger.info("Regime detection: HMM (5-state) with %d-bar persistence filter", PERSISTENCE_BARS)
+        return result
+
+    # Fallback: rule-based (original logic, extended to 5 states)
+    logger.info("Regime detection: rule-based fallback")
     close = df["close"]
     sma50 = SMAIndicator(close, window=50).sma_indicator()
     atr = AverageTrueRange(df["high"], df["low"], close, window=14)
     atr_pct = atr.average_true_range() / close * 100
     macd = MACD(close).macd_diff()
 
-    regime = pd.Series("sideways", index=df.index)
-    regime[(close > sma50) & (macd > 0)] = "bull"
-    regime[(close < sma50) & (macd < 0)] = "bear"
-    regime[atr_pct > 4.0] = "volatile"
+    regime = pd.Series("range", index=df.index)
+    regime[(close > sma50) & (macd > 0) & (atr_pct < 3)] = "weak_trend"
+    regime[(close > sma50) & (macd > 0) & (atr_pct >= 1)] = "strong_trend"
+    regime[(close < sma50) & (macd < 0) & (atr_pct < 3)] = "weak_trend"
+    regime[(close < sma50) & (macd < 0)] = "weak_trend"
+    regime[atr_pct > 4.0] = "high_vol"
+    # Crash: sharp drawdown + high volatility
+    ret_24 = close.pct_change(24)
+    regime[(ret_24 < -0.05) & (atr_pct > 3)] = "crash"
 
     return regime
 
 
 def encode_regime(regime: pd.Series) -> pd.DataFrame:
-    mapping = {"bull": 1, "sideways": 0, "bear": -1, "volatile": 2}
+    """One-hot encode regime labels for the ML model."""
+    mapping = {
+        "strong_trend": 2, "weak_trend": 1, "range": 0,
+        "high_vol": -1, "crash": -2,
+        # Legacy compatibility
+        "bull": 1, "bear": -1, "sideways": 0, "volatile": -1,
+    }
     return pd.DataFrame({
         "regime_code": regime.map(mapping).fillna(0),
-        "regime_is_bull": (regime == "bull").astype(int),
-        "regime_is_bear": (regime == "bear").astype(int),
-        "regime_is_volatile": (regime == "volatile").astype(int),
+        "regime_is_bull": (regime.isin(["strong_trend", "weak_trend", "bull"])).astype(int),
+        "regime_is_bear": (regime.isin(["crash", "bear"])).astype(int),
+        "regime_is_volatile": (regime.isin(["high_vol", "crash", "volatile"])).astype(int),
+        "regime_is_range": (regime.isin(["range", "sideways"])).astype(int),
+        "regime_is_strong": (regime == "strong_trend").astype(int),
     }, index=regime.index)
 
 
