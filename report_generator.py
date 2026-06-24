@@ -16,8 +16,22 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 import anthropic
+
+
+class _SafeEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, Decimal):
+            return float(o)
+        if isinstance(o, (date, datetime)):
+            return o.isoformat()
+        return super().default(o)
+
+
+def _json(obj) -> str:
+    return json.dumps(obj, cls=_SafeEncoder)
 
 import config
 import database as db
@@ -99,6 +113,10 @@ def generate_report(days: int = 7, report_type: str = "weekly") -> dict:
     """
     data = _gather_report_data(days)
     metrics = data["metrics"]
+    # Ensure all metric values are float (MySQL returns Decimal)
+    for k, v in metrics.items():
+        if hasattr(v, '__float__') and not isinstance(v, (int, float, str)):
+            metrics[k] = float(v)
 
     # Build the structured prompt
     fg_str = ""
@@ -197,12 +215,12 @@ Do not use markdown. Use plain text with section headers in CAPS."""
             f"{report_type.title()} Market Report — {today.strftime('%b %d, %Y')}",
             summary,
             report_text,
-            json.dumps([s.get("message", "") for s in data["signals"][:10]]),
-            json.dumps({"screening": [dict(s) for s in data["screening_top10"]] if data["screening_top10"] else []}),
+            _json([s.get("message", "") for s in data["signals"][:10]]),
+            _json({"screening": [dict(s) for s in data["screening_top10"]] if data["screening_top10"] else []}),
             "",
-            json.dumps({"pnl_pct": metrics["pnl_pct"], "win_rate": metrics["win_rate"],
+            _json({"pnl_pct": metrics["pnl_pct"], "win_rate": metrics["win_rate"],
                         "sharpe": metrics["sharpe_ratio"], "max_dd": metrics["max_drawdown_pct"]}),
-            json.dumps(data.get("fear_greed_7d", [])),
+            _json(data.get("fear_greed_7d", [])),
         ),
     )
 

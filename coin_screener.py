@@ -188,24 +188,24 @@ def get_latest_screening() -> list[dict]:
 
 
 def format_screening_telegram(results: list[dict], top_n: int = 10) -> str:
-    """Format top N screening results for Telegram."""
+    """Format top N screening results for Telegram (plain text, no markdown)."""
     if not results:
         return "No screening data available. Run /screen first."
 
     tier_emoji = {"tier1": "🔵", "tier2": "🟡", "tier3": "🔴"}
-    lines = [f"📊 *Coin Screening — Top {top_n}*\n"]
+    lines = [f"📊 Coin Screening — Top {top_n}\n"]
 
     for i, r in enumerate(results[:top_n], 1):
         te = tier_emoji.get(r["risk_tier"], "⚪")
         change_7d = r.get("change_7d_pct") or 0
-        change_color = "+" if change_7d >= 0 else ""
+        sign = "+" if change_7d >= 0 else ""
         cap = r["market_cap"]
         cap_str = f"${cap/1e9:.1f}B" if cap >= 1e9 else f"${cap/1e6:.0f}M"
 
         lines.append(
-            f"{i}\\. {te} *{r['symbol']}* — Score: {r['momentum_score']}/100\n"
-            f"   ${r['price_usd']:,.2f} \\| 7d: {change_color}{change_7d:.1f}% \\| Cap: {cap_str}"
+            f"{i}. {te} {r['symbol']} — Score: {r['momentum_score']}/100\n"
+            f"   ${r['price_usd']:,.2f} | 7d: {sign}{change_7d:.1f}% | Cap: {cap_str}"
         )
 
-    lines.append(f"\n_Tiers: 🔵 >$50B  🟡 $1\\-50B  🔴 <$1B_")
+    lines.append(f"\nTiers: 🔵 >$50B  🟡 $1-50B  🔴 <$1B")
     return "\n".join(lines)

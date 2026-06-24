@@ -1025,7 +1025,7 @@ async def cmd_screen(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     try:
         results = await loop.run_in_executor(None, coin_screener.run_screening, 50)
         msg = coin_screener.format_screening_telegram(results)
-        await update.message.reply_text(msg, parse_mode="MarkdownV2")
+        await update.message.reply_text(msg)
     except Exception as e:
         await update.message.reply_text(f"Screening error: {e}")
 
