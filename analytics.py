@@ -44,6 +44,62 @@ def _get_snapshots(days: int | None = None) -> list[dict]:
         return []
 
 
+def compute_metrics_for_period(start: datetime, end: datetime) -> dict:
+    """
+    Compute metrics for an explicit time window [start, end].
+    Used for previous-period delta comparisons (e.g. 'last 7 days vs prior 7 days').
+    """
+    trades = db.get_trades_in_period(start, end)
+    since_str = start.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Fetch snapshots in range
+    try:
+        rows = db._execute(
+            """SELECT created_at, total_usd FROM portfolio_snapshots
+               WHERE created_at >= %s AND created_at <= %s
+               ORDER BY created_at""",
+            (since_str, end.strftime("%Y-%m-%d %H:%M:%S")),
+            fetch="all",
+        )
+        snapshots = [{"created_at": str(r["created_at"]), "total_usd": r["total_usd"]} for r in rows]
+    except Exception:
+        snapshots = []
+
+    actionable = [t for t in trades if t["action"] in ("buy", "sell") and t["success"]]
+    wins = [t for t in actionable if t.get("outcome") == "correct"]
+    losses = [t for t in actionable if t.get("outcome") == "wrong"]
+    evaluated = len(wins) + len(losses)
+    win_rate = len(wins) / evaluated if evaluated > 0 else 0
+
+    pnl = 0.0
+    pnl_pct = 0.0
+    if len(snapshots) >= 2:
+        first = float(snapshots[0]["total_usd"])
+        last = float(snapshots[-1]["total_usd"])
+        pnl = last - first
+        pnl_pct = (last / first - 1) * 100 if first > 0 else 0
+
+    max_dd_pct = 0.0
+    peak = 0.0
+    for s in snapshots:
+        val = float(s["total_usd"])
+        peak = max(peak, val)
+        if peak > 0:
+            max_dd_pct = max(max_dd_pct, (peak - val) / peak * 100)
+
+    daily_returns = _compute_daily_returns(snapshots)
+    sharpe = _sharpe_ratio(daily_returns)
+
+    return {
+        "pnl_usd": round(pnl, 2),
+        "pnl_pct": round(pnl_pct, 2),
+        "win_rate": round(win_rate, 3),
+        "max_drawdown_pct": round(max_dd_pct, 2),
+        "sharpe_ratio": round(sharpe, 2),
+        "total_trades": len(actionable),
+    }
+
+
 def compute_metrics(days: int | None = None) -> dict:
     """
     Compute comprehensive performance metrics.
@@ -122,6 +178,17 @@ def compute_metrics(days: int | None = None) -> dict:
         total_days = 1
     trades_per_day = len(actionable) / total_days
 
+    # BTC buy-and-hold benchmark: % change in BTC price over the same period
+    btc_benchmark_pct = None
+    if len(snapshots) >= 2:
+        try:
+            first_price = float(snapshots[0].get("price") or 0)
+            last_price = float(snapshots[-1].get("price") or 0)
+            if first_price > 0 and last_price > 0:
+                btc_benchmark_pct = round((last_price / first_price - 1) * 100, 2)
+        except Exception:
+            pass
+
     return {
         "period_days": days or total_days,
         "total_trades": len(actionable),
@@ -145,6 +212,7 @@ def compute_metrics(days: int | None = None) -> dict:
         "max_loss_streak": max_loss_streak,
         "trades_per_day": round(trades_per_day, 1),
         "per_asset": per_asset,
+        "btc_benchmark_pct": btc_benchmark_pct,
     }
 
 

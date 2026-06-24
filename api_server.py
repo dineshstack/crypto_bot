@@ -16,8 +16,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import Body, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 
 def _clean(obj):
@@ -43,7 +44,7 @@ app = FastAPI(title="Crypto Bot API", docs_url="/docs")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "PATCH"],
     allow_headers=["*"],
 )
 
@@ -121,6 +122,25 @@ def get_lessons(
     for r in rows:
         r["created_at"] = str(r["created_at"])
     return rows
+
+
+class LessonUpdate(BaseModel):
+    active: bool
+
+
+@app.patch("/api/lessons/{lesson_id}")
+def patch_lesson(
+    lesson_id: int,
+    body: LessonUpdate,
+    x_api_key: str = Header(None),
+):
+    """Toggle a lesson active/inactive. Called by the Lessons page toggle button."""
+    _auth(x_api_key)
+    db._execute(
+        "UPDATE lessons SET active = %s WHERE id = %s",
+        (1 if body.active else 0, lesson_id),
+    )
+    return {"ok": True, "id": lesson_id, "active": body.active}
 
 
 # ── Weekly Reviews ────────────────────────────────────────────────────────────
@@ -212,6 +232,13 @@ def get_dashboard(x_api_key: str = Header(None)):
     lessons = db.get_active_lessons(5)
     metrics = analytics.compute_metrics(7)
 
+    # Previous 7-day period (days 7–14 ago) — used by MetricCard delta arrows
+    now = datetime.now(timezone.utc)
+    metrics_prev_7d = analytics.compute_metrics_for_period(
+        start=now - timedelta(days=14),
+        end=now - timedelta(days=7),
+    )
+
     latest = snapshots[-1] if snapshots else None
     actionable = [t for t in trades if t["action"] != "hold" and t.get("success")]
     correct = len([t for t in actionable if t.get("outcome") == "correct"])
@@ -228,6 +255,7 @@ def get_dashboard(x_api_key: str = Header(None)):
         "wrong": wrong,
         "actionable_count": len(actionable),
         "metrics_7d": metrics,
+        "metrics_prev_7d": metrics_prev_7d,
     })
 
 
@@ -306,6 +334,35 @@ def get_bot_health(x_api_key: str = Header(None)):
     elif drawdown_pct >= 5 or consec_losses >= 3:
         risk_level = "caution"
 
+    # ── Bot running state (inferred from bot_events log) ────────────────────
+    # The API server is a separate process from the trading bot, so we can't
+    # read the bot's `bot_active` flag directly. Instead we check whether a
+    # cycle_start event was logged within the expected interval window.
+    last_cycle_row = db._execute(
+        "SELECT created_at FROM bot_events WHERE event = 'cycle_start' "
+        "ORDER BY created_at DESC LIMIT 1",
+        fetch="one",
+    )
+    last_cycle_at = str(last_cycle_row["created_at"]) if last_cycle_row else None
+    is_running = False
+    next_cycle_at = None
+
+    if last_cycle_at:
+        try:
+            # Normalise to aware datetime
+            lc = last_cycle_at.replace(" ", "T")
+            last_dt = datetime.fromisoformat(lc)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            age_hours = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+            # Consider running if last cycle was within 1.5× the interval
+            is_running = age_hours < getattr(config, "ANALYSIS_INTERVAL_HOURS", 4) * 1.5
+            if is_running:
+                nxt = last_dt + timedelta(hours=getattr(config, "ANALYSIS_INTERVAL_HOURS", 4))
+                next_cycle_at = nxt.isoformat()
+        except Exception:
+            pass
+
     return _clean({
         "portfolio_usd": latest_total,
         "session_peak_usd": peak,
@@ -321,6 +378,11 @@ def get_bot_health(x_api_key: str = Header(None)):
             "drawdown_halt": config.DRAWDOWN_HALT_PCT * 100,
             "consec_loss_halt": config.CONSECUTIVE_LOSS_HALT,
         },
+        # Bot status fields (consumed by HealthBar in the dashboard)
+        "is_running": is_running,
+        "mode": "testnet" if getattr(config, "TESTNET", True) else "live",
+        "last_cycle_at": last_cycle_at,
+        "next_cycle_at": next_cycle_at,
     })
 
 

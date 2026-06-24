@@ -39,7 +39,9 @@ from ml_signal import (
 logger = logging.getLogger(__name__)
 
 INITIAL_CAPITAL = 200.0
-TRADING_FEE_PCT = 0.1  # Binance spot fee: 0.1%
+TRADING_FEE_PCT = 0.1   # Binance spot taker fee: 0.1% per side
+SLIPPAGE_PCT = 0.05     # Estimated market-impact slippage: 0.05% per side
+# Combined round-trip cost = 2 × (fee + slippage) = 2 × 0.15% = 0.30%
 
 
 @dataclass
@@ -53,14 +55,18 @@ class Trade:
     btc_qty: float = 0
     stop_loss: float = 0
     take_profit: float = 0
-    pnl_usd: float = 0
+    pnl_usd: float = 0         # net P&L after fees + slippage
     pnl_pct: float = 0
-    exit_reason: str = ""  # "take_profit", "stop_loss", "time_exit"
+    gross_pnl_usd: float = 0   # gross P&L before any costs
+    fees_paid_usd: float = 0   # total fees + slippage for this trade
+    exit_reason: str = ""      # "take_profit", "stop_loss", "time_exit"
 
 
 @dataclass
 class BacktestResult:
-    total_return_pct: float = 0
+    total_return_pct: float = 0         # net return (after fees + slippage)
+    total_return_gross_pct: float = 0   # gross return (before any costs)
+    total_fees_usd: float = 0           # total fees + slippage paid
     buy_and_hold_pct: float = 0
     sharpe_ratio: float = 0
     sortino_ratio: float = 0
@@ -236,9 +242,12 @@ def run_backtest(exchange, months: int = 3) -> BacktestResult:
         risk = risk_manager.assess_trade(action, confidence, snapshot, portfolio)
         amount = risk.recommended_usd
 
+        # Cost rate per side: taker fee + slippage
+        cost_pct_per_side = (TRADING_FEE_PCT + SLIPPAGE_PCT) / 100
+
         if action == "buy" and usdt >= amount + 0.5:
-            fee = amount * TRADING_FEE_PCT / 100
-            btc_qty = (amount - fee) / price
+            entry_cost = amount * cost_pct_per_side
+            btc_qty = (amount - entry_cost) / price
             usdt -= amount
             btc += btc_qty
 
@@ -246,11 +255,12 @@ def run_backtest(exchange, months: int = 3) -> BacktestResult:
                 df, i, price, "buy", risk.stop_loss_price, risk.take_profit_price,
             )
 
-            exit_fee = btc_qty * exit_price * TRADING_FEE_PCT / 100
-            pnl = btc_qty * (exit_price - price) - fee - exit_fee
+            exit_cost = btc_qty * exit_price * cost_pct_per_side
+            gross_pnl = btc_qty * (exit_price - price)             # before all costs
+            net_pnl = gross_pnl - entry_cost - exit_cost
             pnl_pct = (exit_price / price - 1) * 100
 
-            usdt += btc_qty * exit_price - exit_fee
+            usdt += btc_qty * exit_price - exit_cost
             btc -= btc_qty
 
             trades.append(Trade(
@@ -259,21 +269,25 @@ def run_backtest(exchange, months: int = 3) -> BacktestResult:
                 action="buy", entry_price=price, exit_price=exit_price,
                 amount_usd=amount, btc_qty=btc_qty,
                 stop_loss=risk.stop_loss_price, take_profit=risk.take_profit_price,
-                pnl_usd=pnl, pnl_pct=pnl_pct, exit_reason=reason,
+                pnl_usd=net_pnl, gross_pnl_usd=gross_pnl,
+                fees_paid_usd=entry_cost + exit_cost,
+                pnl_pct=pnl_pct, exit_reason=reason,
             ))
             cooldown = LOOKAHEAD_HOURS
 
         elif action == "sell" and btc > 0:
             sell_btc = min(btc, amount / price)
-            fee = sell_btc * price * TRADING_FEE_PCT / 100
-            usdt += sell_btc * price - fee
+            entry_cost = sell_btc * price * cost_pct_per_side
+            usdt += sell_btc * price - entry_cost
             btc -= sell_btc
 
             exit_idx, exit_price, reason = _simulate_trade_exit(
                 df, i, price, "sell", risk.stop_loss_price, risk.take_profit_price,
             )
 
-            pnl = sell_btc * (price - exit_price) - fee
+            exit_cost = sell_btc * exit_price * cost_pct_per_side
+            gross_pnl = sell_btc * (price - exit_price)
+            net_pnl = gross_pnl - entry_cost - exit_cost
             pnl_pct = (price / exit_price - 1) * 100 if exit_price > 0 else 0
 
             trades.append(Trade(
@@ -282,7 +296,9 @@ def run_backtest(exchange, months: int = 3) -> BacktestResult:
                 action="sell", entry_price=price, exit_price=exit_price,
                 amount_usd=sell_btc * price, btc_qty=sell_btc,
                 stop_loss=risk.stop_loss_price, take_profit=risk.take_profit_price,
-                pnl_usd=pnl, pnl_pct=pnl_pct, exit_reason=reason,
+                pnl_usd=net_pnl, gross_pnl_usd=gross_pnl,
+                fees_paid_usd=entry_cost + exit_cost,
+                pnl_pct=pnl_pct, exit_reason=reason,
             ))
             cooldown = LOOKAHEAD_HOURS
 
@@ -302,6 +318,12 @@ def run_backtest(exchange, months: int = 3) -> BacktestResult:
     end_price = df.iloc[-1]["close"]
     result.buy_and_hold_pct = round((end_price / start_price - 1) * 100, 2)
     result.total_return_pct = round((final_equity / INITIAL_CAPITAL - 1) * 100, 2)
+
+    # Gross return and total fees paid
+    total_fees = sum(t.fees_paid_usd for t in trades)
+    gross_equity = final_equity + total_fees  # what equity would be without fees
+    result.total_fees_usd = round(total_fees, 2)
+    result.total_return_gross_pct = round((gross_equity / INITIAL_CAPITAL - 1) * 100, 2)
 
     if trades:
         wins = [t for t in trades if t.pnl_usd > 0]
@@ -361,9 +383,12 @@ def print_report(r: BacktestResult):
     print("=" * 60)
     print(f"  Starting capital:   ${INITIAL_CAPITAL:.2f}")
     print(f"  Final equity:       ${r.final_equity:.2f}")
-    print(f"  Bot return:         {r.total_return_pct:+.2f}%")
+    print(f"  Bot return (net):   {r.total_return_pct:+.2f}%   ← after fees & slippage")
+    print(f"  Bot return (gross): {r.total_return_gross_pct:+.2f}%   ← before costs")
+    print(f"  Total fees paid:    ${r.total_fees_usd:.2f}  "
+          f"(fee={TRADING_FEE_PCT}% + slip={SLIPPAGE_PCT}% per side)")
     print(f"  Buy & hold return:  {r.buy_and_hold_pct:+.2f}%")
-    print(f"  Alpha vs B&H:       {r.total_return_pct - r.buy_and_hold_pct:+.2f}%")
+    print(f"  Alpha vs B&H:       {r.total_return_pct - r.buy_and_hold_pct:+.2f}%  (net)")
     print("-" * 60)
     print(f"  Total trades:       {r.total_trades}")
     print(f"  Wins / Losses:      {r.wins} / {r.losses}")

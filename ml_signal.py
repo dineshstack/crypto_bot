@@ -536,11 +536,19 @@ def train_model(exchange) -> dict:
     for col in regime_df.columns:
         df[col] = regime_df[col]
 
-    # ── 8. On-chain features (static for entire dataset — used as latest snapshot) ──
-    onchain = fetch_onchain_features()
-    for k, v in onchain.items():
-        df[k] = v
-    logger.info("ML v2: Added %d on-chain features", len(onchain))
+    # ── 8. On-chain features — excluded from training to prevent look-ahead bias ──
+    # On-chain data (mempool fees, hash rate) is a live snapshot of today's state.
+    # Adding today's values to ALL 8000 historical training rows is look-ahead
+    # bias: the model would learn "when mempool fees = X (today), action = Y"
+    # for candles from months ago when those fees were different.
+    # Fix: on-chain features are injected at predict() time only, where they
+    # are genuinely contemporaneous with the current live candle being evaluated.
+    _onchain_preview = fetch_onchain_features()
+    logger.info(
+        "ML v2: On-chain features [%s] excluded from training (look-ahead bias "
+        "prevention) — injected at inference time only",
+        ", ".join(_onchain_preview.keys()),
+    )
 
     # Drop NaN rows
     feature_cols = _get_feature_cols(df)
@@ -712,19 +720,64 @@ def train_model(exchange) -> dict:
     meta_model = LogisticRegression(max_iter=1000)
     meta_model.fit(meta_X, meta_y)
 
-    # Train final base models on ALL data
-    model_xgb.fit(X_sel, y_mapped)
-    model_lgb.fit(X_sel, y_mapped)
+    # ── Train final base models + Platt scaling calibration ──────────────────
+    # Platt scaling calibrates raw model probabilities so that "60% buy"
+    # actually corresponds to a ~60% empirical win rate (reliability).
+    # Without calibration, tree ensembles are typically overconfident.
+    #
+    # Approach:
+    #   1. Train base models on first 80% (time-ordered, to preserve temporal order)
+    #   2. Calibrate on last 20% using method='sigmoid' (Platt scaling)
+    #   3. Final ensemble uses calibrated base models → more trustworthy probabilities
+    #
+    # Note: the LogisticRegression meta-learner already provides a second layer
+    # of calibration via the stacking. Platt on the base models improves the
+    # quality of the base probabilities fed into the meta-learner.
+
+    try:
+        from sklearn.calibration import CalibratedClassifierCV
+
+        cal_split = int(len(X_sel) * 0.80)   # time-ordered split
+        X_fit = X_sel.iloc[:cal_split]
+        y_fit = y_mapped.iloc[:cal_split]
+        X_cal = X_sel.iloc[cal_split:]
+        y_cal = y_mapped.iloc[cal_split:]
+
+        # Train on 80%, calibrate on 20%
+        model_xgb.fit(X_fit, y_fit)
+        model_lgb.fit(X_fit, y_fit)
+
+        cal_xgb = CalibratedClassifierCV(model_xgb, cv="prefit", method="sigmoid")
+        cal_xgb.fit(X_cal, y_cal)
+        cal_lgb = CalibratedClassifierCV(model_lgb, cv="prefit", method="sigmoid")
+        cal_lgb.fit(X_cal, y_cal)
+
+        logger.info(
+            "ML v2: Platt scaling applied (sigmoid, calibration set=%d rows)", len(X_cal)
+        )
+        calibrated_xgb = cal_xgb
+        calibrated_lgb = cal_lgb
+        calibration_applied = True
+
+    except Exception as cal_exc:
+        logger.warning("ML v2: Platt scaling failed (%s) — training on all data without calibration", cal_exc)
+        # Fallback: train on full dataset, no calibration
+        model_xgb.fit(X_sel, y_mapped)
+        model_lgb.fit(X_sel, y_mapped)
+        calibrated_xgb = model_xgb
+        calibrated_lgb = model_lgb
+        calibration_applied = False
 
     # ── Save everything ──
     MODEL_DIR.mkdir(exist_ok=True)
     ensemble = {
-        "xgb": model_xgb,
-        "lgb": model_lgb,
+        "xgb": calibrated_xgb,
+        "lgb": calibrated_lgb,
         "meta": meta_model,
         "selected_features": selected_features,
         "label_map": label_map,
         "reverse_map": {0: "sell", 1: "hold", 2: "buy"},
+        "calibrated": calibration_applied,
     }
     joblib.dump(ensemble, MODEL_PATH)
 
@@ -748,6 +801,8 @@ def train_model(exchange) -> dict:
         "xgb_params": best_xgb_params or "defaults",
         "lgb_params": best_lgb_params or "defaults",
         "regime_at_train": current_regime,
+        "calibrated": calibration_applied,
+        "calibration_method": "platt_sigmoid" if calibration_applied else "none",
     }
     joblib.dump(meta, META_PATH)
 
@@ -788,6 +843,9 @@ def predict(exchange) -> dict:
         "ml_model_accuracy": None,
         "ml_regime": None,
         "ml_available": False,
+        # SHAP explainability — populated when shap package is installed
+        "ml_top_features": None,   # list of {feature, value, direction} dicts
+        "ml_explanation": None,    # human-readable explanation string
     }
 
     ensemble, meta = _load_model()
@@ -865,6 +923,61 @@ def predict(exchange) -> dict:
             direction.upper(), prob_buy * 100, prob_hold * 100,
             prob_sell * 100, current_regime,
         )
+
+        # ── SHAP explainability ──────────────────────────────────────────────
+        # Compute SHAP values on the XGBoost base model (fastest for TreeExplainer).
+        # Maps which features pushed the prediction toward buy/sell/hold.
+        # Falls back gracefully if shap is not installed.
+        try:
+            import shap
+
+            # class_idx: 0=sell, 1=hold, 2=buy — explain the predicted class
+            class_idx = pred_class
+            xgb_model = ensemble["xgb"]
+            # CalibratedClassifierCV wraps the raw estimator; unwrap if needed
+            raw_xgb = getattr(xgb_model, "estimator", xgb_model)
+
+            explainer = shap.TreeExplainer(raw_xgb)
+            shap_values = explainer.shap_values(latest)  # shape: (n_classes, 1, n_features)
+
+            # shap_values can be shape (n_classes, n_samples, n_features) or (n_samples, n_features)
+            if isinstance(shap_values, list):
+                sv = np.array(shap_values[class_idx])[0]   # (n_features,)
+            elif shap_values.ndim == 3:
+                sv = shap_values[class_idx, 0, :]
+            else:
+                sv = shap_values[0, :]
+
+            feat_names = selected
+            top_n = 5
+            top_idxs = np.argsort(np.abs(sv))[::-1][:top_n]
+            top_features = []
+            parts = []
+            for idx in top_idxs:
+                fname = feat_names[idx]
+                fval = float(latest.iloc[0][fname])
+                sv_val = float(sv[idx])
+                push = "↑ buy" if sv_val > 0 else "↓ sell/hold"
+                top_features.append({
+                    "feature": fname,
+                    "value": round(fval, 4),
+                    "shap": round(sv_val, 4),
+                    "direction": push,
+                })
+                parts.append(f"{fname}={fval:.3f} ({push})")
+
+            explanation = (
+                f"Top drivers for {direction.upper()} signal: "
+                + "; ".join(parts[:3])
+            )
+            result["ml_top_features"] = top_features
+            result["ml_explanation"] = explanation
+            logger.info("ML v2 SHAP: %s", explanation)
+
+        except ImportError:
+            logger.debug("ML v2: shap not installed — skipping explainability (pip install shap)")
+        except Exception as shap_exc:
+            logger.debug("ML v2: SHAP failed: %s", shap_exc)
 
     except Exception as exc:
         logger.error("ML v2: Prediction failed: %s", exc)
@@ -992,11 +1105,16 @@ def get_ml_context(exchange) -> str:
         if drift["drift_detected"]:
             drift_str += " ⚠️ DRIFT DETECTED"
 
+    # SHAP explanation — include top feature drivers when available
+    explanation = data.get("ml_explanation")
+    expl_str = f"\n  Explanation:   {explanation}" if explanation else ""
+
     return (
         f"ML SIGNAL (v2 Ensemble — XGBoost+LightGBM stacked, 3-class):\n"
         f"  Prediction:  {direction.upper()} (buy={prob_buy:.0%} / sell={prob_sell:.0%})\n"
         f"  Confidence:  {conf_label} ({conf:.0%}){acc_str}\n"
         f"  Regime:      {regime}\n"
-        f"  Training:    Triple Barrier labels, multi-timeframe, Optuna-tuned{drift_str}\n"
+        f"  Training:    Triple Barrier labels, multi-timeframe, Optuna-tuned{drift_str}"
+        f"{expl_str}\n"
         f"  Note: ML is one signal among many — weight alongside technicals and sentiment"
     )

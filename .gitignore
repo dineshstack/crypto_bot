@@ -10,3 +10,5 @@ ml_models/
 logs/
 bot.log
 *.log
+ANALYSIS_REPORT_June2026.md
+IMPLEMENTATION_PLAN.md

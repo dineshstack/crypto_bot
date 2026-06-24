@@ -54,12 +54,49 @@ def _execute(sql: str, params: tuple = (), fetch: str = "none") -> list | dict |
 
 # ── Bootstrap ───────────────────────────────────────────────────────────────
 
+def _column_exists(table: str, column: str) -> bool:
+    """Check if a column exists in the given table (MySQL-safe)."""
+    row = _execute(
+        """SELECT COUNT(*) AS cnt FROM INFORMATION_SCHEMA.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE()
+             AND TABLE_NAME = %s AND COLUMN_NAME = %s""",
+        (table, column),
+        fetch="one",
+    )
+    return bool(row and row.get("cnt", 0))
+
+
+def _migrate_lessons():
+    """
+    Idempotent migration — adds new columns to the lessons table.
+    Safe to run on every startup; skips columns that already exist.
+
+    New columns:
+      trade_id      INT NULL        — ID of the trade that triggered the lesson
+      category      VARCHAR(50) NULL — timing | risk_management | technical | sentiment | macro
+      times_applied INT DEFAULT 0   — how many times Claude cited this lesson in a decision
+    """
+    migrations = [
+        ("trade_id",      "ALTER TABLE lessons ADD COLUMN trade_id INT NULL"),
+        ("category",      "ALTER TABLE lessons ADD COLUMN category VARCHAR(50) NULL"),
+        ("times_applied", "ALTER TABLE lessons ADD COLUMN times_applied INT NOT NULL DEFAULT 0"),
+    ]
+    for col, sql in migrations:
+        if not _column_exists("lessons", col):
+            try:
+                _execute(sql)
+                logger.info("DB migration: added lessons.%s", col)
+            except Exception as exc:
+                logger.warning("DB migration failed for lessons.%s: %s", col, exc)
+
+
 def init():
-    """Verify MySQL connection is reachable."""
+    """Verify MySQL connection and run idempotent migrations."""
     try:
         _execute("SELECT 1", fetch="one")
         logger.info("MySQL connected OK (%s@%s/%s)",
                      config.MYSQL_USER, config.MYSQL_HOST, config.MYSQL_DATABASE)
+        _migrate_lessons()
     except Exception as exc:
         logger.error("MySQL connection failed: %s", exc)
         raise
@@ -158,12 +195,32 @@ def get_first_snapshot_total() -> float | None:
 
 # ── Lessons ───────────────────────────────────────────────────────────────────
 
-def save_lesson(text: str, source: str, trade_id: str | None = None) -> str:
+def save_lesson(
+    text: str,
+    source: str,
+    trade_id: str | None = None,
+    category: str | None = None,
+) -> str:
+    """
+    Save a lesson. category is one of:
+      timing | risk_management | technical | sentiment | macro
+    """
     row_id = _execute(
-        "INSERT INTO lessons (lesson, source, trade_id, active) VALUES (%s, %s, %s, 1)",
-        (text, source, trade_id),
+        "INSERT INTO lessons (lesson, source, trade_id, category, active) VALUES (%s, %s, %s, %s, 1)",
+        (text, source, trade_id, category),
     )
     return str(row_id)
+
+
+def increment_lesson_applied(lesson_id: int):
+    """Increment times_applied counter when a lesson is cited in a decision."""
+    try:
+        _execute(
+            "UPDATE lessons SET times_applied = times_applied + 1 WHERE id = %s",
+            (lesson_id,),
+        )
+    except Exception as exc:
+        logger.debug("increment_lesson_applied failed: %s", exc)
 
 
 def get_active_lessons(limit: int = 5) -> list[str]:
@@ -383,17 +440,17 @@ def get_research_by_id(research_id: int) -> dict | None:
 # ── Analytics helpers (used by analytics.py) ──────────────────────────────────
 
 def get_snapshots(limit: int = 2000, since: str = None) -> list[dict]:
-    """Get portfolio snapshots for equity curve."""
+    """Get portfolio snapshots for equity curve (includes BTC price for benchmark)."""
     if since:
         rows = _execute(
-            """SELECT created_at, total_usd FROM portfolio_snapshots
+            """SELECT created_at, total_usd, price FROM portfolio_snapshots
                WHERE created_at >= %s ORDER BY created_at LIMIT %s""",
             (since, limit),
             fetch="all",
         )
     else:
         rows = _execute(
-            "SELECT created_at, total_usd FROM portfolio_snapshots ORDER BY created_at LIMIT %s",
+            "SELECT created_at, total_usd, price FROM portfolio_snapshots ORDER BY created_at LIMIT %s",
             (limit,),
             fetch="all",
         )
