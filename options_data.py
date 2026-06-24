@@ -150,6 +150,42 @@ def get_options_data() -> dict:
         parts.append(f"MaxPain=${mp:,.0f} ({dist:+.1f}%)")
 
     result["summary"] = ", ".join(parts) if parts else "no options data"
+
+    # Composite options flow signal (combines P/C + DVOL + max pain proximity)
+    score = 0  # -3 to +3 scale
+    pcr_val = result["put_call_ratio"]
+    if pcr_val is not None:
+        if pcr_val < 0.5:
+            score += 2
+        elif pcr_val < 0.7:
+            score += 1
+        elif pcr_val > 1.3:
+            score -= 2
+        elif pcr_val > 1.0:
+            score -= 1
+
+    dvol_val = result["dvol"]
+    if dvol_val:
+        if dvol_val > 60:
+            score -= 1  # extreme fear
+        elif dvol_val < 30:
+            score += 1  # calm, breakout pending
+
+    mp_dist = result.get("max_pain_distance_pct")
+    if mp_dist is not None:
+        if mp_dist > 5:
+            score += 1  # price below max pain → upward pull
+        elif mp_dist < -5:
+            score -= 1  # price above max pain → downward pull
+
+    if score >= 2:
+        result["composite_signal"] = "bullish"
+    elif score <= -2:
+        result["composite_signal"] = "bearish"
+    else:
+        result["composite_signal"] = "neutral"
+    result["composite_score"] = score
+
     return result
 
 
@@ -188,6 +224,10 @@ def get_options_context() -> str:
     if strikes:
         strike_str = ", ".join(f"${s['strike']:,.0f}" for s in strikes[:3])
         lines.append(f"  Key OI levels: {strike_str}")
+
+    composite = data.get("composite_signal", "neutral")
+    cscore = data.get("composite_score", 0)
+    lines.append(f"  COMPOSITE:     {composite.upper()} (score {cscore:+d}/6)")
 
     return "\n".join(lines)
 

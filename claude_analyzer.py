@@ -26,6 +26,7 @@ import whale_monitor
 import ml_signal
 import ws_stream
 import grid_dca
+import onchain_macro
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,14 @@ DERIVATIVES
   Open Interest: {oi_str}
   Long/Short:    {ls_str} {ls_detail}
 
-Fear & Greed:    {snapshot["fear_greed"]}/100 — {snapshot["fear_greed_lbl"]}"""
+Fear & Greed:    {snapshot["fear_greed"]}/100 — {snapshot["fear_greed_lbl"]} (7d trend: {snapshot.get("fear_greed_trend", "unknown")}, 7d avg: {snapshot.get("fear_greed_avg7d", "N/A")})
+
+TIMEFRAME CONSENSUS (1h / 4h / 1d regimes from resampled data):
+  1h regime:  {snapshot.get("tf_regime_1h", "N/A")}
+  4h regime:  {snapshot.get("tf_regime_4h", "N/A")}
+  1d regime:  {snapshot.get("tf_regime_1d", "N/A")}
+  Direction:  {snapshot.get("tf_direction", "mixed")} ({snapshot.get("tf_agreement", 0)}/3 timeframes agree)
+  Note: low agreement (< 2/3) means mixed signals — favour hold over directional trades"""
 
     if ws_context:
         prompt += f"\n\n{ws_context}"
@@ -174,6 +182,13 @@ CROSS-ASSET RULES (critical — BTC correlations in 2026):
 - VIX < 15 = complacency = BTC can rally
 - Gold UP + BTC DOWN = divergence warning (check if money flowing to gold as safe haven)
 - US 10Y yield rising sharply = tightening conditions = bearish for risk assets including BTC
+
+ON-CHAIN MACRO RULES (if provided):
+- MVRV-Z > 7 = extreme overvaluation — historically precedes 50%+ corrections, reduce exposure
+- MVRV-Z 3-7 = elevated — caution, not a sell signal alone but tighten stops
+- MVRV-Z 0-3 = fair value — neutral signal
+- MVRV-Z < 0 = historically undervalued — strong accumulation zone, increase exposure
+- Exchange net inflow = selling pressure building; net outflow = accumulation (bullish)
 
 OUTPUT — valid JSON only:
 {
@@ -424,6 +439,13 @@ def analyze(snapshot: dict, portfolio: dict, exchange=None) -> dict:
     logger.info("Whale activity: %s", whale_data.get("summary", "N/A"))
 
     whale_section = f"\n\n{whale_ctx}" if whale_ctx else ""
+
+    # On-chain macro signals (MVRV-Z score, exchange flow)
+    macro_onchain_ctx = onchain_macro.get_onchain_macro_context()
+    if macro_onchain_ctx:
+        logger.info("MVRV-Z: %s", onchain_macro.get_mvrv_z().get("signal", "N/A"))
+        # Append to macro section so sentiment agent sees it
+        macro_section += f"\n\n{macro_onchain_ctx}"
 
     # Real-time WebSocket data (live price, trade flow, liquidations, anomalies)
     ws_symbol = snapshot.get("symbol", "BTC/USDT").replace("/", "").lower()

@@ -131,3 +131,24 @@ CREATE TABLE IF NOT EXISTS coin_watchlist (
     UNIQUE KEY uq_watchlist_coin (coin_id),
     INDEX idx_watchlist_active (active)
 ) ENGINE=InnoDB;
+
+-- ── Backtest runs ───────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    period_months   INT            NOT NULL DEFAULT 6,
+    start_date      DATE           NULL,
+    end_date        DATE           NULL,
+    total_trades    INT            NOT NULL DEFAULT 0,
+    wins            INT            NOT NULL DEFAULT 0,
+    losses          INT            NOT NULL DEFAULT 0,
+    win_rate        DECIMAL(5,3)   NOT NULL DEFAULT 0,
+    sharpe_ratio    DECIMAL(8,3)   NOT NULL DEFAULT 0,
+    sortino_ratio   DECIMAL(8,3)   NOT NULL DEFAULT 0,
+    max_drawdown_pct DECIMAL(8,3)  NOT NULL DEFAULT 0,
+    profit_factor   DECIMAL(8,3)   NOT NULL DEFAULT 0,
+    total_return_pct DECIMAL(8,3)  NOT NULL DEFAULT 0,
+    equity_curve    JSON           NULL,
+    config_snapshot JSON           NULL,
+    created_at      TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_backtest_created (created_at)
+) ENGINE=InnoDB;

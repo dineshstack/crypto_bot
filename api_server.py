@@ -343,6 +343,84 @@ def get_trade_detail(trade_id: int, x_api_key: str = Header(None)):
     return _clean(row)
 
 
+# ── Live Derivatives Data ────────────────────────────────────────────────────
+
+@app.get("/api/derivatives")
+def get_derivatives(x_api_key: str = Header(None)):
+    """Live BTC + ETH derivatives data from Binance Futures (public, no key)."""
+    _auth(x_api_key)
+    import requests
+
+    result = {}
+    for symbol, label in [("BTCUSDT", "btc"), ("ETHUSDT", "eth")]:
+        data = {"funding_rate": None, "oi": None, "long_short_ratio": None,
+                "long_pct": None, "short_pct": None}
+        try:
+            r = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex",
+                             params={"symbol": symbol}, timeout=5)
+            if r.ok:
+                d = r.json()
+                rate = float(d.get("lastFundingRate", 0))
+                data["funding_rate"] = round(rate * 100, 4)
+                data["funding_annual"] = round(rate * 3 * 365 * 100, 1)
+        except Exception:
+            pass
+        try:
+            r = requests.get("https://fapi.binance.com/fapi/v1/openInterest",
+                             params={"symbol": symbol}, timeout=5)
+            if r.ok:
+                data["oi"] = round(float(r.json().get("openInterest", 0)), 2)
+        except Exception:
+            pass
+        try:
+            r = requests.get("https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+                             params={"symbol": symbol, "period": "4h", "limit": 1}, timeout=5)
+            if r.ok and r.json():
+                d = r.json()[0]
+                data["long_short_ratio"] = round(float(d.get("longShortRatio", 1)), 3)
+                data["long_pct"] = round(float(d.get("longAccount", 0.5)) * 100, 1)
+                data["short_pct"] = round(float(d.get("shortAccount", 0.5)) * 100, 1)
+        except Exception:
+            pass
+
+        # Derivatives pressure label
+        fr = data["funding_rate"] or 0
+        if fr > 0.05:
+            data["pressure"] = "overheated_longs"
+        elif fr < -0.01:
+            data["pressure"] = "short_squeeze_risk"
+        else:
+            data["pressure"] = "neutral"
+
+        result[label] = data
+
+    return result
+
+
+# ── Backtest Runs ────────────────────────────────────────────────────────────
+
+@app.get("/api/backtests")
+def get_backtests(
+    limit: int = Query(20),
+    x_api_key: str = Header(None),
+):
+    _auth(x_api_key)
+    rows = db._execute(
+        "SELECT * FROM backtest_runs ORDER BY created_at DESC LIMIT %s",
+        (limit,),
+        fetch="all",
+    )
+    for r in rows:
+        r["created_at"] = str(r["created_at"])
+        r["start_date"] = str(r.get("start_date", ""))
+        r["end_date"] = str(r.get("end_date", ""))
+        if isinstance(r.get("equity_curve"), str):
+            r["equity_curve"] = json.loads(r["equity_curve"])
+        if isinstance(r.get("config_snapshot"), str):
+            r["config_snapshot"] = json.loads(r["config_snapshot"])
+    return _clean(rows)
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
