@@ -220,6 +220,105 @@ def get_watchlist(x_api_key: str = Header(None)):
     return _clean(db.get_watchlist())
 
 
+# ── Plain English Market Summary ──────────────────────────────────────────────
+
+def _build_market_summary(trades: list, metrics: dict) -> dict:
+    """Generate beginner-friendly market interpretation + traffic light signal."""
+    last_trade = next((t for t in trades if t.get("decision")), None)
+    d = {}
+    if last_trade:
+        dec = last_trade.get("decision")
+        if isinstance(dec, str):
+            dec = json.loads(dec)
+        d = dec or {}
+
+    action = d.get("action", "hold")
+    confidence = d.get("confidence", 0.5)
+    risk = d.get("risk", "medium")
+    reason = d.get("reason", "")
+
+    # Traffic light
+    if action == "buy" and confidence >= 0.7 and risk in ("low", "medium"):
+        light = "green"
+        light_label = "Favorable conditions"
+    elif action == "sell" or risk == "high" or confidence < 0.5:
+        light = "red"
+        light_label = "Caution — protect capital"
+    else:
+        light = "yellow"
+        light_label = "Wait and watch"
+
+    # Plain English summary
+    parts = []
+
+    # Market mood
+    fg = None
+    mkt = last_trade.get("market") if last_trade else None
+    if mkt:
+        if isinstance(mkt, str):
+            mkt = json.loads(mkt)
+        fg = mkt.get("fear_greed")
+
+    if fg is not None:
+        if fg <= 20:
+            parts.append(f"The market is in **Extreme Fear** (Fear & Greed: {fg}/100). This means most investors are scared and selling. Historically, extreme fear can signal a buying opportunity — but it can also mean more drops ahead.")
+        elif fg <= 40:
+            parts.append(f"The market is **Fearful** (Fear & Greed: {fg}/100). Investors are cautious. Prices may continue to be volatile.")
+        elif fg <= 60:
+            parts.append(f"The market is **Neutral** (Fear & Greed: {fg}/100). Neither overly optimistic nor pessimistic. A balanced time for careful decisions.")
+        elif fg <= 80:
+            parts.append(f"The market is **Greedy** (Fear & Greed: {fg}/100). Investors are optimistic. Good momentum but watch for overextension.")
+        else:
+            parts.append(f"The market is in **Extreme Greed** (Fear & Greed: {fg}/100). Investors are overly optimistic. This often precedes corrections — be cautious about new entries.")
+
+    # What the bot is doing and why
+    if action == "hold":
+        parts.append(f"Your bot is **holding cash and waiting**. It analyzed technical indicators, market sentiment, news, on-chain data, and AI predictions — and decided the risk/reward isn't favorable right now. This is the safe, disciplined approach.")
+    elif action == "buy":
+        parts.append(f"Your bot detected a **buying opportunity** and wants to invest. The signals suggest prices may rise. The confidence level is {confidence:.0%}.")
+    elif action == "sell":
+        parts.append(f"Your bot wants to **sell and protect profits**. The signals suggest potential downside risk. It's recommending reducing exposure.")
+
+    # Why specifically
+    if reason:
+        parts.append(f"**Bot's reasoning:** _{reason}_")
+
+    # Performance context
+    pnl = metrics.get("pnl_pct", 0)
+    if pnl != 0:
+        if pnl > 0:
+            parts.append(f"**This week's performance:** The portfolio is **up {pnl:.1f}%**. The strategy is generating positive returns.")
+        else:
+            parts.append(f"**This week's performance:** The portfolio is **down {abs(pnl):.1f}%** this week. The bot is being conservative to limit further losses.")
+
+    # Advice
+    if light == "green":
+        parts.append("💡 **What this means for you:** Conditions are favorable for small, measured investments. The bot may execute trades if you're in live mode.")
+    elif light == "red":
+        parts.append("💡 **What this means for you:** Now is a time for patience, not action. The bot is protecting your capital by staying out of risky trades. This discipline is what prevents large losses.")
+    else:
+        parts.append("💡 **What this means for you:** The signals are mixed — some positive, some negative. The bot is waiting for clearer direction before committing capital. No action needed from you.")
+
+    return {
+        "traffic_light": light,
+        "traffic_label": light_label,
+        "summary": "\n\n".join(parts),
+        "action": action,
+        "confidence": confidence,
+        "risk": risk,
+        "fear_greed": fg,
+    }
+
+
+@app.get("/api/market-summary")
+def get_market_summary(x_api_key: str = Header(None)):
+    """Plain English market summary for beginners."""
+    _auth(x_api_key)
+    trades = db.get_recent_trades(20)
+    metrics = analytics.compute_metrics(7)
+    return _clean(_build_market_summary(trades, metrics))
+
+
 # ── Dashboard summary (single call for homepage) ─────────────────────────────
 
 @app.get("/api/dashboard")
@@ -256,6 +355,7 @@ def get_dashboard(x_api_key: str = Header(None)):
         "actionable_count": len(actionable),
         "metrics_7d": metrics,
         "metrics_prev_7d": metrics_prev_7d,
+        "market_summary": _build_market_summary(trades, metrics),
     })
 
 
