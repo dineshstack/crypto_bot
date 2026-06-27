@@ -223,14 +223,64 @@ async def _on_anomaly(event: ws_stream.AnomalyEvent):
         "liquidation_cascade": "💀",
     }.get(event.event_type, "⚠️")
 
-    sev = "🔴 CRITICAL" if event.severity == "critical" else "🟡 WARNING"
     sym_label = event.symbol.replace("usdt", "").upper()
+    abs_change = abs(event.change_pct)
 
-    await notify(
-        f"{emoji} *{sev}: {sym_label} {_esc(event.event_type.replace('_', ' ').upper())}*\n"
-        f"Price: ${event.price:,.0f}  \\|  Change: {event.change_pct:+.1f}%\n"
-        f"_{_esc(event.detail)}_"
+    # Build context-aware explanation for each alert type
+    if event.event_type == "volume_spike":
+        if abs_change < 0.5:
+            context = (
+                "What this means: Unusually high trading volume detected but price isn't moving much. "
+                "This is often normal — large institutional orders, OTC trades clearing, or market-maker activity. "
+                "No action needed. The bot will factor this into its next analysis."
+            )
+            severity_label = "LOW PRIORITY"
+        else:
+            context = (
+                "What this means: High volume WITH price movement — smart money may be positioning. "
+                "The bot is monitoring this closely. If the move continues, the next analysis cycle will respond."
+            )
+            severity_label = "MONITOR"
+
+    elif event.event_type == "flash_crash":
+        context = (
+            "What this means: Price dropped sharply in a short time. This could be a liquidation cascade, "
+            "a whale dump, or panic selling. The bot is automatically running an emergency analysis right now "
+            "to decide whether to act. Watch for the follow-up analysis message. "
+            "DO NOT panic sell manually — let the bot analyze first."
+        )
+        severity_label = "CRITICAL — Bot analyzing now"
+
+    elif event.event_type == "breakout":
+        context = (
+            "What this means: Price surged upward quickly. This could be a genuine breakout or a fake-out "
+            "that reverses. The bot will analyze whether this momentum is sustainable in the next cycle. "
+            "DO NOT FOMO buy manually — let the bot decide if the breakout is real."
+        )
+        severity_label = "WATCH — Don't chase"
+
+    elif event.event_type == "liquidation_cascade":
+        context = (
+            "What this means: Large number of leveraged traders are being forced to sell/buy by exchanges. "
+            "This creates a cascade effect — price typically keeps moving in the same direction. "
+            "The bot is running an emergency analysis right now. This is the most significant alert type. "
+            "Pay close attention to the follow-up analysis."
+        )
+        severity_label = "CRITICAL — Emergency analysis triggered"
+
+    else:
+        context = "Unusual market activity detected. The bot is monitoring the situation."
+        severity_label = "INFO"
+
+    message = (
+        f"{emoji} {sym_label} — {event.event_type.replace('_', ' ').upper()}\n"
+        f"Price: ${event.price:,.0f} | Change: {event.change_pct:+.1f}%\n"
+        f"{event.detail}\n\n"
+        f"[{severity_label}]\n"
+        f"{context}"
     )
+
+    await notify(message)
 
     # Critical events interrupt the 4h sleep → trigger immediate analysis
     if event.severity == "critical" and _emergency_event and bot_active:
