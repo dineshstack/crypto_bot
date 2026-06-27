@@ -711,8 +711,16 @@ async def notify(text: str):
                 text=text,
                 parse_mode="MarkdownV2",
             )
-        except Exception as e:
-            logger.error("Telegram notify error: %s", e)
+        except Exception:
+            # MarkdownV2 failed — retry as plain text (strip formatting)
+            try:
+                plain = text.replace("\\", "")
+                await tg_app.bot.send_message(
+                    chat_id=config.TELEGRAM_CHAT_ID,
+                    text=plain,
+                )
+            except Exception as e2:
+                logger.error("Telegram notify error: %s", e2)
 
 
 def _auth(update: Update) -> bool:
