@@ -167,7 +167,7 @@ TIMEFRAME CONSENSUS (1h / 4h / 1d regimes from resampled data):
     if ws_context:
         prompt += f"\n\n{ws_context}"
 
-    return _call_claude("market", _MARKET_SYSTEM, prompt, defaults={
+    return _call_claude("market", _MARKET_SYSTEM, prompt, max_tokens=400, defaults={
         "trend": "neutral", "strength": "moderate", "volatility": "moderate",
         "derivatives_bias": "neutral", "key_signals": [], "risk_level": "medium",
         "summary": "Unable to assess market",
@@ -274,7 +274,7 @@ def _run_sentiment_agent(news_section: str, social_section: str,
 
     prompt = "Analyse this BTC sentiment data:\n\n" + "\n\n".join(parts)
 
-    return _call_claude("sentiment", _SENTIMENT_SYSTEM, prompt, defaults={
+    return _call_claude("sentiment", _SENTIMENT_SYSTEM, prompt, max_tokens=500, defaults={
         "news_bias": "neutral", "social_bias": "neutral",
         "onchain_bias": "neutral", "overall_sentiment": "neutral",
         "confidence": 0.5, "key_factors": [],
@@ -352,7 +352,7 @@ def _run_decision_agent(market: dict, sentiment: dict,
 {context}
 Base DCA = $5. Suggest $2–$15 depending on opportunity quality."""
 
-    return _call_claude("decision", _DECISION_SYSTEM, prompt, defaults={
+    return _call_claude("decision", _DECISION_SYSTEM, prompt, max_tokens=400, defaults={
         "action": "hold", "trade_usd": 0, "confidence": 0.5,
         "risk": "high", "reason": "Unable to decide — defaulting to hold",
         "signals": [],
