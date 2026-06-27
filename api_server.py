@@ -259,6 +259,16 @@ def _build_market_summary(trades: list, metrics: dict) -> dict:
             mkt = json.loads(mkt)
         fg = mkt.get("fear_greed")
 
+    # Fallback: fetch Fear & Greed directly if not in trade data
+    if fg is None:
+        try:
+            import requests as _req
+            r = _req.get("https://api.alternative.me/fng/?limit=1", timeout=5)
+            if r.ok:
+                fg = int(r.json()["data"][0]["value"])
+        except Exception:
+            pass
+
     if fg is not None:
         if fg <= 20:
             parts.append(f"The market is in **Extreme Fear** (Fear & Greed: {fg}/100). This means most investors are scared and selling. Historically, extreme fear can signal a buying opportunity — but it can also mean more drops ahead.")
