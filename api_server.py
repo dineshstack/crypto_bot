@@ -78,6 +78,132 @@ def get_snapshots(
     return _clean(db.get_snapshots(limit=limit, since=since))
 
 
+# ── Portfolio Ledger ──────────────────────────────────────────────────────────
+
+@app.get("/api/portfolio-ledger")
+def get_portfolio_ledger(
+    limit: int = Query(500, le=2000),
+    x_api_key: str = Header(None),
+):
+    """Portfolio value history with changes between each snapshot, plus trades annotated."""
+    _auth(x_api_key)
+
+    snapshots = db._execute(
+        """SELECT id, created_at, usdt, btc, price, total_usd
+           FROM portfolio_snapshots ORDER BY created_at DESC LIMIT %s""",
+        (limit,),
+        fetch="all",
+    )
+    trades = db._execute(
+        """SELECT id, created_at, action, amount_usd, btc_qty, price, success, error,
+                  outcome, decision
+           FROM trades WHERE action != 'hold' AND success = 1
+           ORDER BY created_at DESC LIMIT %s""",
+        (limit,),
+        fetch="all",
+    )
+
+    # Build ledger entries
+    entries = []
+
+    for i, s in enumerate(snapshots):
+        total = float(s["total_usd"])
+        prev_total = float(snapshots[i + 1]["total_usd"]) if i + 1 < len(snapshots) else total
+        change_usd = total - prev_total
+        change_pct = (total / prev_total - 1) * 100 if prev_total > 0 else 0
+
+        entries.append({
+            "type": "snapshot",
+            "timestamp": str(s["created_at"]),
+            "total_usd": total,
+            "usdt": float(s["usdt"]),
+            "btc": float(s["btc"]),
+            "btc_price": float(s["price"]),
+            "change_usd": round(change_usd, 2),
+            "change_pct": round(change_pct, 2),
+            "description": _describe_snapshot_change(change_usd, change_pct, total, float(s["price"])),
+        })
+
+    # Annotate trades into the timeline
+    for t in trades:
+        d = t.get("decision")
+        if isinstance(d, str):
+            try:
+                d = json.loads(d)
+            except Exception:
+                d = {}
+        d = d or {}
+
+        amount = float(t.get("amount_usd", 0))
+        action = t.get("action", "")
+        price = float(t.get("price", 0))
+
+        entries.append({
+            "type": "trade",
+            "timestamp": str(t["created_at"]),
+            "action": action,
+            "amount_usd": amount,
+            "btc_qty": float(t.get("btc_qty", 0)),
+            "btc_price": price,
+            "outcome": t.get("outcome"),
+            "change_usd": amount if action == "sell" else -amount,
+            "change_pct": 0,
+            "reason": d.get("reason", ""),
+            "confidence": d.get("confidence"),
+            "description": _describe_trade(action, amount, price, t.get("outcome"), d.get("reason", "")),
+        })
+
+    # Sort by timestamp descending
+    entries.sort(key=lambda e: e["timestamp"], reverse=True)
+
+    return _clean(entries)
+
+
+def _describe_snapshot_change(change_usd: float, change_pct: float, total: float, btc_price: float) -> str:
+    """Generate plain English description of portfolio change."""
+    if abs(change_usd) < 0.50:
+        return f"Portfolio steady at ${total:,.2f}. BTC price: ${btc_price:,.0f}. No significant change since last check."
+
+    direction = "increased" if change_usd > 0 else "decreased"
+    reason = ""
+    if abs(change_pct) > 2:
+        reason = " This is a significant move — likely due to a large BTC price swing."
+    elif abs(change_pct) > 0.5:
+        reason = " This reflects normal market price fluctuation in your BTC holdings."
+    else:
+        reason = " This is a minor fluctuation within normal range."
+
+    return (
+        f"Portfolio {direction} by ${abs(change_usd):,.2f} ({change_pct:+.1f}%) "
+        f"to ${total:,.2f}. BTC at ${btc_price:,.0f}.{reason}"
+    )
+
+
+def _describe_trade(action: str, amount: float, price: float, outcome: str | None, reason: str) -> str:
+    """Generate plain English description of a trade."""
+    if action == "buy":
+        desc = f"Bot purchased ${amount:.2f} worth of BTC at ${price:,.0f}."
+        if reason:
+            desc += f" Reason: {reason}"
+        if outcome == "correct":
+            desc += " ✅ This trade was evaluated as CORRECT — price moved in the predicted direction."
+        elif outcome == "wrong":
+            desc += " ❌ This trade was evaluated as WRONG — price moved against the prediction."
+        elif outcome is None:
+            desc += " ⏳ Outcome pending — will be evaluated after 4 hours."
+    elif action == "sell":
+        desc = f"Bot sold ${amount:.2f} worth of BTC at ${price:,.0f}."
+        if reason:
+            desc += f" Reason: {reason}"
+        if outcome == "correct":
+            desc += " ✅ Correct call — price dropped after selling."
+        elif outcome == "wrong":
+            desc += " ❌ Wrong call — price rose after selling."
+    else:
+        desc = f"Trade: {action} ${amount:.2f} at ${price:,.0f}."
+    return desc
+
+
 # ── Trades ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/trades")
