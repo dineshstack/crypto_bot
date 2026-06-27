@@ -362,10 +362,15 @@ Base DCA = $5. Suggest $2–$15 depending on opportunity quality."""
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _parse_json(raw: str, defaults: dict) -> dict:
-    """Parse JSON from Claude's response, with regex fallback."""
+    """Parse JSON from Claude's response, stripping markdown fences if present."""
+    # Strip ```json ... ``` fences
+    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", raw.strip())
+    cleaned = re.sub(r"\n?```\s*$", "", cleaned.strip())
+
     try:
-        return json.loads(raw)
+        return json.loads(cleaned)
     except json.JSONDecodeError:
+        # Fallback: extract first JSON object with regex
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
             try:
