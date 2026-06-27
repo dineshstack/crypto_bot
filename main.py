@@ -693,13 +693,68 @@ async def run_eth_cycle():
         await notify(f"⚠️ ETH cycle error — {_esc(str(exc)[:100])}")
 
 
+async def _send_daily_briefing():
+    """Send a plain-English morning briefing via Telegram."""
+    try:
+        snap = md.get_market_snapshot(exchange)
+        port = md.get_portfolio(exchange)
+        price = snap["price"]
+        total = port["usdt"] + port["btc"] * price
+        fg = snap.get("fear_greed", "?")
+        fg_lbl = snap.get("fear_greed_lbl", "")
+        rsi = snap.get("rsi", "?")
+
+        # Yesterday's trades
+        trades = db.get_recent_trades(20)
+        yesterday_buys = len([t for t in trades if t["action"] == "buy" and t.get("success")])
+        yesterday_sells = len([t for t in trades if t["action"] == "sell" and t.get("success")])
+        yesterday_holds = len([t for t in trades if t["action"] == "hold"])
+
+        # Build briefing
+        lines = [
+            f"Good morning! Here's your daily crypto briefing:\n",
+            f"BTC: ${price:,.0f} | RSI: {rsi} | Fear & Greed: {fg}/100 ({fg_lbl})",
+            f"Portfolio: ${total:,.2f}",
+            f"",
+            f"Yesterday: {yesterday_holds} holds, {yesterday_buys} buys, {yesterday_sells} sells",
+        ]
+
+        if yesterday_buys == 0 and yesterday_sells == 0:
+            lines.append("The bot held cash all day — conditions weren't favorable for trading. This is disciplined behavior.")
+
+        # Market mood context
+        if fg != "?" and int(fg) <= 20:
+            lines.append("\nMarket mood: Extreme Fear. Historically, extreme fear periods often precede recoveries — but timing is uncertain.")
+        elif fg != "?" and int(fg) >= 75:
+            lines.append("\nMarket mood: Greed. Prices may be overextended. The bot will be cautious about new entries.")
+
+        lines.append("\nNothing requires your action. The bot is monitoring 24/7.")
+
+        await notify("\n".join(lines))
+        logger.info("Daily briefing sent")
+    except Exception as exc:
+        logger.debug("Daily briefing error: %s", exc)
+
+
 async def _loop():
     """Periodic loop: run cycle → sleep → check weekly review → repeat."""
     global bot_active, _emergency_event
     _emergency_event = asyncio.Event()
 
+    _last_briefing_date = ""
+
     while bot_active:
         _emergency_event.clear()
+
+        # Daily morning briefing — once per day
+        today_str = datetime.date.today().isoformat()
+        if today_str != _last_briefing_date:
+            _last_briefing_date = today_str
+            try:
+                await _send_daily_briefing()
+            except Exception:
+                logger.debug("Daily briefing failed")
+
         await run_cycle()         # BTC analysis
         await run_eth_cycle()     # ETH analysis
 

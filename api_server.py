@@ -452,7 +452,34 @@ def get_market_summary(x_api_key: str = Header(None)):
     _auth(x_api_key)
     trades = db.get_recent_trades(20)
     metrics = analytics.compute_metrics(7)
-    return _clean(_build_market_summary(trades, metrics))
+    # "What would have happened" — for recent HOLDs, show the avoided outcome
+    what_if = None
+    recent_holds = [t for t in trades if t.get("action") == "hold"][:1]
+    if recent_holds:
+        h = recent_holds[0]
+        h_price = float(h.get("price", 0))
+        # Find a snapshot ~4h later
+        try:
+            later = db._execute(
+                """SELECT price FROM portfolio_snapshots
+                   WHERE created_at > %s ORDER BY created_at LIMIT 1""",
+                (h["created_at"],),
+                fetch="one",
+            )
+            if later and h_price > 0:
+                later_price = float(later["price"])
+                change_pct = (later_price / h_price - 1) * 100
+                hypothetical_loss = 5.0 * (change_pct / 100)  # $5 base trade
+                if change_pct < -0.5:
+                    what_if = f"Good call to HOLD! If the bot had bought ${5:.0f} at ${h_price:,.0f}, it would have lost ${abs(hypothetical_loss):.2f} ({change_pct:.1f}% drop). The bot saved you money by waiting."
+                elif change_pct > 0.5:
+                    what_if = f"The bot held while price rose {change_pct:+.1f}%. A missed opportunity of ${abs(hypothetical_loss):.2f} — but the bot prioritized safety because signals were mixed."
+                else:
+                    what_if = f"Price barely moved ({change_pct:+.1f}%) after the HOLD. No missed opportunity — the bot was right to wait for a clearer signal."
+        except Exception:
+            pass
+
+    return _clean({**_build_market_summary(trades, metrics), "what_if": what_if})
 
 
 # ── Dashboard summary (single call for homepage) ─────────────────────────────
