@@ -61,6 +61,7 @@ class Trade:
     gross_pnl_usd: float = 0   # gross P&L before any costs
     fees_paid_usd: float = 0   # total fees + slippage for this trade
     exit_reason: str = ""      # "take_profit", "stop_loss", "time_exit"
+    signal_prob: float = 0     # model probability that triggered the entry
 
 
 @dataclass
@@ -153,12 +154,17 @@ BACKTEST_TRADE_STATS = {
 
 
 def run_backtest(exchange, months: int = 3,
-                 model_path=None, meta_path=None) -> BacktestResult:
+                 model_path=None, meta_path=None,
+                 placebo_lag: int = 0) -> BacktestResult:
     """
     Run full backtest simulation.
     Uses ML model predictions if available, otherwise falls back to
     simple indicator-based signals. Pass model_path/meta_path to simulate
     with a holdout-trained model instead of the live one.
+
+    placebo_lag > 0 shifts every prediction that many bars into the past
+    (the signal for bar i was computed at bar i−lag). A genuine edge must
+    die under a 24-bar lag; results that survive prove harness leakage.
     """
     logger.info("Backtest: Fetching %d months of data...", months)
     df_1h, df_4h, df_1d = fetch_backtest_data(exchange, months)
@@ -231,6 +237,15 @@ def run_backtest(exchange, months: int = 3,
             )
     except Exception as exc:
         logger.info("Backtest: No ML model — using indicator signals: %s", exc)
+
+    if placebo_lag > 0 and ml_available:
+        df["ml_buy_prob"] = df["ml_buy_prob"].shift(placebo_lag).fillna(0)
+        df["ml_sell_prob"] = df["ml_sell_prob"].shift(placebo_lag).fillna(0)
+        logger.warning(
+            "Backtest: PLACEBO — predictions lagged %d bars. "
+            "A real edge must die here; strong results = harness leakage.",
+            placebo_lag,
+        )
 
     # If no ML, use simple signal rules
     if not ml_available:
@@ -327,7 +342,7 @@ def run_backtest(exchange, months: int = 3,
                 stop_loss=risk.stop_loss_price, take_profit=risk.take_profit_price,
                 pnl_usd=net_pnl, gross_pnl_usd=gross_pnl,
                 fees_paid_usd=entry_cost + exit_cost,
-                pnl_pct=pnl_pct, exit_reason=reason,
+                pnl_pct=pnl_pct, exit_reason=reason, signal_prob=buy_prob,
             ))
             cooldown = LOOKAHEAD_HOURS
 
@@ -354,7 +369,7 @@ def run_backtest(exchange, months: int = 3,
                 stop_loss=risk.stop_loss_price, take_profit=risk.take_profit_price,
                 pnl_usd=net_pnl, gross_pnl_usd=gross_pnl,
                 fees_paid_usd=entry_cost + exit_cost,
-                pnl_pct=pnl_pct, exit_reason=reason,
+                pnl_pct=pnl_pct, exit_reason=reason, signal_prob=sell_prob,
             ))
             cooldown = LOOKAHEAD_HOURS
 
@@ -485,6 +500,29 @@ def print_report(r: BacktestResult):
         print()
 
 
+def save_trades_csv(r: BacktestResult, path: str = "backtest_trades.csv"):
+    """Full trade ledger for hand-auditing entries against the real chart."""
+    if not r.trades:
+        return
+    rows = [{
+        "entry_time": t.entry_time.isoformat(),
+        "exit_time": t.exit_time.isoformat() if t.exit_time else "",
+        "action": t.action,
+        "signal_prob": round(t.signal_prob, 4),
+        "entry_price": round(t.entry_price, 2),
+        "exit_price": round(t.exit_price, 2),
+        "stop_loss": round(t.stop_loss, 2),
+        "take_profit": round(t.take_profit, 2),
+        "amount_usd": round(t.amount_usd, 2),
+        "pnl_pct": round(t.pnl_pct, 4),
+        "pnl_usd": round(t.pnl_usd, 4),
+        "fees_paid_usd": round(t.fees_paid_usd, 4),
+        "exit_reason": t.exit_reason,
+    } for t in r.trades]
+    pd.DataFrame(rows).to_csv(path, index=False)
+    print(f"  Trade ledger saved to {path} ({len(rows)} trades)")
+
+
 def save_equity_csv(r: BacktestResult, path: str = "backtest_equity.csv"):
     """Save equity curve to CSV for charting."""
     if not r.equity_curve:
@@ -507,6 +545,10 @@ if __name__ == "__main__":
     parser.add_argument("--holdout", action="store_true",
                         help="Out-of-sample: retrain a model on data ending --months ago, "
                              "then backtest those months with candles the model never saw")
+    parser.add_argument("--placebo", type=int, nargs="?", const=24, default=0,
+                        metavar="BARS",
+                        help="Leakage test: lag predictions by BARS (default 24). "
+                             "A real edge must die; good results here = harness bug")
     args = parser.parse_args()
 
     import ccxt
@@ -531,15 +573,20 @@ if __name__ == "__main__":
         print("=== Training complete — running OUT-OF-SAMPLE simulation ===\n")
 
     result = run_backtest(exchange, months=args.months,
-                          model_path=model_path, meta_path=meta_path)
+                          model_path=model_path, meta_path=meta_path,
+                          placebo_lag=args.placebo)
     print_report(result)
     if args.holdout:
         print("  NOTE: out-of-sample run — the model never saw these candles.")
+    if args.placebo:
+        print(f"  PLACEBO RUN (predictions lagged {args.placebo} bars): "
+              "strong results here mean the harness leaks — not an edge.")
 
+    save_trades_csv(result)
     if args.csv:
         save_equity_csv(result)
 
-    if not args.no_db:
+    if not args.no_db and not args.placebo:
         try:
             import database
             curve = result.equity_curve
