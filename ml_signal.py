@@ -55,7 +55,11 @@ DRIFT_WINDOW = 20
 def fetch_ohlcv_paginated(exchange, symbol: str, timeframe: str,
                           total_candles: int = 5000) -> pd.DataFrame:
     all_candles = []
-    since = None
+    # Anchor `since` at (now − total_candles) and paginate forward. Starting
+    # from since=None returns the NEWEST 1000 candles, after which the cursor
+    # sits past "now" and the loop dies — capping every fetch at ~1000 rows.
+    tf_ms = int(exchange.parse_timeframe(timeframe) * 1000)
+    since = exchange.milliseconds() - total_candles * tf_ms
     per_request = 1000
 
     while len(all_candles) < total_candles:
@@ -500,6 +504,46 @@ def _get_feature_cols(df: pd.DataFrame) -> list[str]:
     return [c for c in df.columns if c not in exclude]
 
 
+def derive_trade_thresholds(oos_proba: np.ndarray, oos_y: np.ndarray,
+                            pt_pct: float = PROFIT_TARGET_PCT,
+                            sl_pct: float = STOP_LOSS_PCT,
+                            round_trip_cost_pct: float = 0.30,
+                            min_signals: int = 30) -> dict:
+    """
+    Choose buy/sell probability gates from OUT-OF-SAMPLE predictions by
+    maximising expected value per trade, net of round-trip costs.
+
+    A hardcoded gate (the old 0.55) is meaningless for a rare-class problem:
+    with ~6% buy prevalence a well-behaved classifier tops out far below it.
+    EV per signal at gate t:  P(win|p>t)·pt − P(loss|p>t)·sl − costs.
+    oos_y uses mapped classes (0=sell, 1=hold, 2=buy).
+    """
+    out = {}
+    for side, col, win_class, lose_class, win_pct, lose_pct in (
+        ("buy", 2, 2, 0, pt_pct, sl_pct),
+        ("sell", 0, 0, 2, sl_pct, pt_pct),
+    ):
+        probs = oos_proba[:, col] if oos_proba.shape[1] > col else np.zeros(len(oos_y))
+        best_t, best_ev, best_n = None, -np.inf, 0
+        for t in np.arange(0.02, 0.91, 0.01):
+            mask = probs > t
+            n = int(mask.sum())
+            if n < min_signals:
+                break  # thresholds only get stricter from here
+            y_sig = oos_y[mask]
+            p_win = float((y_sig == win_class).mean())
+            p_lose = float((y_sig == lose_class).mean())
+            ev = p_win * win_pct - p_lose * lose_pct - round_trip_cost_pct
+            if ev > best_ev:
+                best_t, best_ev, best_n = round(float(t), 3), ev, n
+        out[side] = {
+            "threshold": best_t,
+            "ev_pct_per_trade": round(best_ev, 4) if best_t is not None else None,
+            "oos_signals": best_n,
+        }
+    return out
+
+
 def train_model(exchange) -> dict:
     import xgboost as xgb
     import lightgbm as lgb
@@ -720,6 +764,17 @@ def train_model(exchange) -> dict:
     meta_model = LogisticRegression(max_iter=1000)
     meta_model.fit(meta_X, meta_y)
 
+    # ── Decision gates from OOS expected value (replaces hardcoded 0.55) ────
+    thresholds = derive_trade_thresholds(meta_model.predict_proba(meta_X), meta_y)
+    buy_threshold = thresholds["buy"]["threshold"] or 0.55
+    sell_threshold = thresholds["sell"]["threshold"] or 0.55
+    logger.info(
+        "ML v2: OOS-derived gates — buy>%.3f (EV %s%%/trade, %s signals), "
+        "sell>%.3f (EV %s%%/trade, %s signals)",
+        buy_threshold, thresholds["buy"]["ev_pct_per_trade"], thresholds["buy"]["oos_signals"],
+        sell_threshold, thresholds["sell"]["ev_pct_per_trade"], thresholds["sell"]["oos_signals"],
+    )
+
     # ── Train final base models + Platt scaling calibration ──────────────────
     # Platt scaling calibrates raw model probabilities so that "60% buy"
     # actually corresponds to a ~60% empirical win rate (reliability).
@@ -747,9 +802,16 @@ def train_model(exchange) -> dict:
         model_xgb.fit(X_fit, y_fit)
         model_lgb.fit(X_fit, y_fit)
 
-        cal_xgb = CalibratedClassifierCV(model_xgb, cv="prefit", method="sigmoid")
+        # sklearn >= 1.6 removed cv="prefit" (raises, which used to silently
+        # skip calibration entirely); FrozenEstimator is its replacement.
+        try:
+            from sklearn.frozen import FrozenEstimator
+            cal_xgb = CalibratedClassifierCV(FrozenEstimator(model_xgb), method="sigmoid")
+            cal_lgb = CalibratedClassifierCV(FrozenEstimator(model_lgb), method="sigmoid")
+        except ImportError:  # sklearn < 1.6
+            cal_xgb = CalibratedClassifierCV(model_xgb, cv="prefit", method="sigmoid")
+            cal_lgb = CalibratedClassifierCV(model_lgb, cv="prefit", method="sigmoid")
         cal_xgb.fit(X_cal, y_cal)
-        cal_lgb = CalibratedClassifierCV(model_lgb, cv="prefit", method="sigmoid")
         cal_lgb.fit(X_cal, y_cal)
 
         logger.info(
@@ -778,6 +840,8 @@ def train_model(exchange) -> dict:
         "label_map": label_map,
         "reverse_map": {0: "sell", 1: "hold", 2: "buy"},
         "calibrated": calibration_applied,
+        "buy_threshold": buy_threshold,
+        "sell_threshold": sell_threshold,
     }
     joblib.dump(ensemble, MODEL_PATH)
 
@@ -803,6 +867,9 @@ def train_model(exchange) -> dict:
         "regime_at_train": current_regime,
         "calibrated": calibration_applied,
         "calibration_method": "platt_sigmoid" if calibration_applied else "none",
+        "buy_threshold": buy_threshold,
+        "sell_threshold": sell_threshold,
+        "threshold_details": thresholds,
     }
     joblib.dump(meta, META_PATH)
 
@@ -916,6 +983,11 @@ def predict(exchange) -> dict:
             "ml_model_accuracy": meta.get("cv_accuracy"),
             "ml_regime": current_regime,
             "ml_available": True,
+            # OOS-derived gates: a probability only means "trade" relative to these
+            "ml_buy_threshold": ensemble.get("buy_threshold"),
+            "ml_sell_threshold": ensemble.get("sell_threshold"),
+            "ml_buy_signal": prob_buy > ensemble.get("buy_threshold", 1.0),
+            "ml_sell_signal": prob_sell > ensemble.get("sell_threshold", 1.0),
         })
 
         logger.info(

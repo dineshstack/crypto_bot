@@ -32,7 +32,8 @@ import pandas as pd
 import config
 import risk_manager
 from ml_signal import (
-    engineer_features, triple_barrier_label, detect_regime,
+    engineer_features, triple_barrier_label, detect_regime, encode_regime,
+    fetch_ohlcv_paginated,
     LOOKAHEAD_HOURS, PROFIT_TARGET_PCT, STOP_LOSS_PCT,
 )
 
@@ -88,30 +89,29 @@ class BacktestResult:
     trades: list = field(default_factory=list)
 
 
-def fetch_backtest_data(exchange, months: int = 3) -> pd.DataFrame:
-    """Fetch historical data for backtesting with pagination."""
-    total_candles = months * 30 * 24  # hourly candles
-    all_candles = []
-    since = int((datetime.now(timezone.utc) - timedelta(days=months * 30))
-                .timestamp() * 1000)
+def fetch_backtest_data(exchange, months: int = 3):
+    """
+    Fetch 1h/4h/1d history for backtesting.
+
+    Always pulls from production Binance (public market data, no keys):
+    the sandbox exchange holds only ~40 days of candles, which silently
+    shrank every "6 month" backtest to 6 weeks. The 4h/1d frames are what
+    the trained model expects — without them 25/56 features were zero-filled.
+    """
+    import ccxt
+    data_exchange = ccxt.binance({
+        "enableRateLimit": True, "options": {"defaultType": "spot"},
+    })
 
     import time
-    while len(all_candles) < total_candles:
-        batch = exchange.fetch_ohlcv("BTC/USDT", "1h", since=since, limit=1000)
-        if not batch:
-            break
-        all_candles.extend(batch)
-        since = batch[-1][0] + 1
-        if len(batch) < 1000:
-            break
-        time.sleep(exchange.rateLimit / 1000)
-
-    df = pd.DataFrame(
-        all_candles[:total_candles],
-        columns=["ts", "open", "high", "low", "close", "volume"],
-    )
-    df = df.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
-    return df
+    hours = months * 30 * 24
+    df_1h = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "1h", total_candles=hours)
+    time.sleep(1)
+    # +60 bars of warm-up so 50-period indicators are valid from the start
+    df_4h = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "4h", total_candles=hours // 4 + 60)
+    time.sleep(1)
+    df_1d = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "1d", total_candles=months * 30 + 60)
+    return df_1h, df_4h, df_1d
 
 
 def _simulate_trade_exit(candles: pd.DataFrame, entry_idx: int,
@@ -150,23 +150,37 @@ def run_backtest(exchange, months: int = 3) -> BacktestResult:
     simple indicator-based signals.
     """
     logger.info("Backtest: Fetching %d months of data...", months)
-    df = fetch_backtest_data(exchange, months)
-    if len(df) < 500:
-        logger.error("Backtest: Not enough data (%d candles)", len(df))
+    df_1h, df_4h, df_1d = fetch_backtest_data(exchange, months)
+    if len(df_1h) < 500:
+        logger.error("Backtest: Not enough data (%d candles)", len(df_1h))
         return BacktestResult()
 
-    logger.info("Backtest: %d candles loaded. Engineering features...", len(df))
-    df = engineer_features(df)
+    logger.info("Backtest: 1h=%d, 4h=%d, 1d=%d candles loaded. Engineering features...",
+                len(df_1h), len(df_4h), len(df_1d))
+    df = engineer_features(df_1h, df_4h, df_1d)
     df["regime"] = detect_regime(df)
+    # Same regime one-hots the model was trained with (regime_is_* features)
+    regime_df = encode_regime(df["regime"])
+    for col in regime_df.columns:
+        df[col] = regime_df[col]
 
     # Try loading trained ML model for predictions
     ml_available = False
+    buy_gate = sell_gate = 0.55  # fallback for indicator signals (prob set to 0.65)
     try:
         from ml_signal import _load_model
         ensemble, meta = _load_model()
         if ensemble and meta:
             selected = ensemble["selected_features"]
             missing = [f for f in selected if f not in df.columns]
+            if missing:
+                # Zero-filling model inputs silently invalidates the backtest —
+                # make it impossible to miss.
+                logger.warning(
+                    "Backtest: %d/%d model features MISSING from the feature "
+                    "pipeline and zero-filled — results are unreliable: %s",
+                    len(missing), len(selected), missing,
+                )
             for f in missing:
                 df[f] = 0
             # Batch predict
@@ -179,7 +193,14 @@ def run_backtest(exchange, months: int = 3) -> BacktestResult:
             df["ml_buy_prob"] = final_proba[:, 2] if final_proba.shape[1] > 2 else 0
             df["ml_sell_prob"] = final_proba[:, 0] if final_proba.shape[1] > 0 else 0
             ml_available = True
-            logger.info("Backtest: ML model loaded — using ensemble predictions")
+            # Gates derived from OOS expected value at train time — a fixed
+            # 0.55 sits ~4x above what a 6%-prevalence class can produce
+            buy_gate = ensemble.get("buy_threshold", 0.55)
+            sell_gate = ensemble.get("sell_threshold", 0.55)
+            logger.info(
+                "Backtest: ML model loaded — ensemble predictions, "
+                "gates buy>%.3f sell>%.3f", buy_gate, sell_gate,
+            )
     except Exception as exc:
         logger.info("Backtest: No ML model — using indicator signals: %s", exc)
 
@@ -226,12 +247,16 @@ def run_backtest(exchange, months: int = 3) -> BacktestResult:
         confidence = 0.5
         btc_alloc = (btc * price) / total_equity if total_equity > 0 else 0
 
-        if buy_prob > 0.55 and btc_alloc < config.MAX_BTC_ALLOC_PCT:
+        # Confidence for sizing: normalise signal strength relative to its
+        # gate (risk_manager.confidence_multiplier expects ~0.5–0.95, but the
+        # calibrated gates for a 6%-prevalence class sit far below that).
+        # prob == gate → 0.5x sizing floor; prob == 2×gate → 0.95 full size.
+        if buy_prob > buy_gate and btc_alloc < config.MAX_BTC_ALLOC_PCT:
             action = "buy"
-            confidence = min(0.95, buy_prob)
-        elif sell_prob > 0.55 and btc > 0:
+            confidence = min(0.95, 0.5 + 0.45 * (buy_prob - buy_gate) / max(buy_gate, 1e-9))
+        elif sell_prob > sell_gate and btc > 0:
             action = "sell"
-            confidence = min(0.95, sell_prob)
+            confidence = min(0.95, 0.5 + 0.45 * (sell_prob - sell_gate) / max(sell_gate, 1e-9))
 
         if action == "hold":
             continue
