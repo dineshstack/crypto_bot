@@ -526,6 +526,9 @@ def analyze(snapshot: dict, portfolio: dict, exchange=None) -> dict:
     decision["sentiment_assessment"] = sentiment_assessment.get("summary", "")
     decision["ml_prediction"] = ml_data.get("ml_direction", "")
     decision["ml_probability"] = ml_data.get("ml_probability_up")
+    # Gate flags persisted with the decision → per-signal attribution later
+    decision["ml_buy_signal"] = bool(ml_data.get("ml_buy_signal"))
+    decision["ml_sell_signal"] = bool(ml_data.get("ml_sell_signal"))
 
     logger.info(
         "Decision: %s $%.2f (conf %.0f%%) — %s",

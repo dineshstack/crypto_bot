@@ -1222,12 +1222,39 @@ def get_ml_context(exchange) -> str:
     explanation = data.get("ml_explanation")
     expl_str = f"\n  Explanation:   {explanation}" if explanation else ""
 
+    # Gate status — the decision agent must know when a validated,
+    # EV-derived gate fires (rare: ~4-5 bars/month). Historical OOS record
+    # of gate-fired trades: 113W/10L (91.9%) across 8 disjoint 3-month
+    # windows covering bull, bear and chop (see ROADMAP.md, Phase 0 exit).
+    buy_th = data.get("ml_buy_threshold")
+    sell_th = data.get("ml_sell_threshold")
+    if data.get("ml_buy_signal"):
+        gate_str = (
+            f"\n  >>> BUY GATE ACTIVE: p(buy)={prob_buy:.2f} exceeds the validated "
+            f"gate {buy_th:.2f}. This rare signal won 91.9% of 123 out-of-sample "
+            f"trades across all market regimes. Treat as a strong evidence-backed "
+            f"BUY unless risk management vetoes. <<<"
+        )
+    elif data.get("ml_sell_signal"):
+        gate_str = (
+            f"\n  >>> SELL GATE ACTIVE: p(sell)={prob_sell:.2f} exceeds the "
+            f"validated gate {sell_th:.2f}. Same evidence basis as the buy gate. <<<"
+        )
+    elif buy_th is not None:
+        gate_str = (
+            f"\n  Gates: buy fires at p>{buy_th:.2f}, sell at p>{sell_th:.2f} — "
+            f"neither active this bar; ML supports HOLD"
+        )
+    else:
+        gate_str = ""
+
     return (
         f"ML SIGNAL (v2 Ensemble — XGBoost+LightGBM stacked, 3-class):\n"
         f"  Prediction:  {direction.upper()} (buy={prob_buy:.0%} / sell={prob_sell:.0%})\n"
         f"  Confidence:  {conf_label} ({conf:.0%}){acc_str}\n"
         f"  Regime:      {regime}\n"
         f"  Training:    Triple Barrier labels, multi-timeframe, Optuna-tuned{drift_str}"
-        f"{expl_str}\n"
-        f"  Note: ML is one signal among many — weight alongside technicals and sentiment"
+        f"{expl_str}{gate_str}\n"
+        f"  Note: outside an active gate, ML is one signal among many — weight "
+        f"alongside technicals and sentiment"
     )
