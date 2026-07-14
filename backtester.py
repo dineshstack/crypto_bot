@@ -155,7 +155,8 @@ BACKTEST_TRADE_STATS = {
 
 def run_backtest(exchange, months: int = 3,
                  model_path=None, meta_path=None,
-                 placebo_lag: int = 0) -> BacktestResult:
+                 placebo_lag: int = 0,
+                 offset_months: int = 0) -> BacktestResult:
     """
     Run full backtest simulation.
     Uses ML model predictions if available, otherwise falls back to
@@ -166,8 +167,8 @@ def run_backtest(exchange, months: int = 3,
     (the signal for bar i was computed at bar i−lag). A genuine edge must
     die under a 24-bar lag; results that survive prove harness leakage.
     """
-    logger.info("Backtest: Fetching %d months of data...", months)
-    df_1h, df_4h, df_1d = fetch_backtest_data(exchange, months)
+    logger.info("Backtest: Fetching %d months of data...", months + offset_months)
+    df_1h, df_4h, df_1d = fetch_backtest_data(exchange, months + offset_months)
     if len(df_1h) < 500:
         logger.error("Backtest: Not enough data (%d candles)", len(df_1h))
         return BacktestResult()
@@ -261,6 +262,19 @@ def run_backtest(exchange, months: int = 3,
         df.loc[buy_mask, "ml_buy_prob"] = 0.65
         df.loc[sell_mask, "ml_sell_prob"] = 0.65
 
+    # Windowed backtest: drop the most recent offset_months so runs with
+    # different offsets form DISJOINT evidence windows (PRINCIPLES gate G2).
+    if offset_months > 0:
+        end_ts = int(df["ts"].max()) - offset_months * 30 * 24 * 3600 * 1000
+        n_before = len(df)
+        df = df[df["ts"] <= end_ts].reset_index(drop=True)
+        logger.info(
+            "Backtest: OFFSET — window shifted %d months into the past "
+            "(%d→%d bars, window ends %s)",
+            offset_months, n_before, len(df),
+            pd.Timestamp(end_ts, unit="ms").date(),
+        )
+
     # ── Simulation loop ──
     usdt = INITIAL_CAPITAL
     btc = 0.0
@@ -304,8 +318,14 @@ def run_backtest(exchange, months: int = 3,
         if action == "hold":
             continue
 
-        # Risk-managed sizing
-        snapshot = {"price": price, "atr": atr_val, "atr_pct": atr_pct}
+        # Realistic fill: the signal is computed on bar i's CLOSE, so the
+        # earliest executable price is the NEXT bar's open. Filling at bar
+        # i's own close is a look-ahead-flavored optimism the live bot
+        # cannot reproduce.
+        entry_price = df.iloc[i + 1]["open"]
+
+        # Risk-managed sizing (stops/targets anchored to the actual fill)
+        snapshot = {"price": entry_price, "atr": atr_val, "atr_pct": atr_pct}
         portfolio = {"usdt": usdt, "btc": btc}
         risk = risk_manager.assess_trade(
             action, confidence, snapshot, portfolio,
@@ -318,26 +338,27 @@ def run_backtest(exchange, months: int = 3,
 
         if action == "buy" and usdt >= amount + 0.5:
             entry_cost = amount * cost_pct_per_side
-            btc_qty = (amount - entry_cost) / price
+            btc_qty = (amount - entry_cost) / entry_price
             usdt -= amount
             btc += btc_qty
 
+            # entry at bar i+1's open; barrier scan starts at bar i+1 too
             exit_idx, exit_price, reason = _simulate_trade_exit(
-                df, i, price, "buy", risk.stop_loss_price, risk.take_profit_price,
+                df, i, entry_price, "buy", risk.stop_loss_price, risk.take_profit_price,
             )
 
             exit_cost = btc_qty * exit_price * cost_pct_per_side
-            gross_pnl = btc_qty * (exit_price - price)             # before all costs
+            gross_pnl = btc_qty * (exit_price - entry_price)       # before all costs
             net_pnl = gross_pnl - entry_cost - exit_cost
-            pnl_pct = (exit_price / price - 1) * 100
+            pnl_pct = (exit_price / entry_price - 1) * 100
 
             usdt += btc_qty * exit_price - exit_cost
             btc -= btc_qty
 
             trades.append(Trade(
-                entry_time=datetime.fromtimestamp(df.iloc[i]["ts"] / 1000, tz=timezone.utc),
+                entry_time=datetime.fromtimestamp(df.iloc[i + 1]["ts"] / 1000, tz=timezone.utc),
                 exit_time=datetime.fromtimestamp(df.iloc[exit_idx]["ts"] / 1000, tz=timezone.utc),
-                action="buy", entry_price=price, exit_price=exit_price,
+                action="buy", entry_price=entry_price, exit_price=exit_price,
                 amount_usd=amount, btc_qty=btc_qty,
                 stop_loss=risk.stop_loss_price, take_profit=risk.take_profit_price,
                 pnl_usd=net_pnl, gross_pnl_usd=gross_pnl,
@@ -347,25 +368,25 @@ def run_backtest(exchange, months: int = 3,
             cooldown = LOOKAHEAD_HOURS
 
         elif action == "sell" and btc > 0:
-            sell_btc = min(btc, amount / price)
-            entry_cost = sell_btc * price * cost_pct_per_side
-            usdt += sell_btc * price - entry_cost
+            sell_btc = min(btc, amount / entry_price)
+            entry_cost = sell_btc * entry_price * cost_pct_per_side
+            usdt += sell_btc * entry_price - entry_cost
             btc -= sell_btc
 
             exit_idx, exit_price, reason = _simulate_trade_exit(
-                df, i, price, "sell", risk.stop_loss_price, risk.take_profit_price,
+                df, i, entry_price, "sell", risk.stop_loss_price, risk.take_profit_price,
             )
 
             exit_cost = sell_btc * exit_price * cost_pct_per_side
-            gross_pnl = sell_btc * (price - exit_price)
+            gross_pnl = sell_btc * (entry_price - exit_price)
             net_pnl = gross_pnl - entry_cost - exit_cost
-            pnl_pct = (price / exit_price - 1) * 100 if exit_price > 0 else 0
+            pnl_pct = (entry_price / exit_price - 1) * 100 if exit_price > 0 else 0
 
             trades.append(Trade(
-                entry_time=datetime.fromtimestamp(df.iloc[i]["ts"] / 1000, tz=timezone.utc),
+                entry_time=datetime.fromtimestamp(df.iloc[i + 1]["ts"] / 1000, tz=timezone.utc),
                 exit_time=datetime.fromtimestamp(df.iloc[exit_idx]["ts"] / 1000, tz=timezone.utc),
-                action="sell", entry_price=price, exit_price=exit_price,
-                amount_usd=sell_btc * price, btc_qty=sell_btc,
+                action="sell", entry_price=entry_price, exit_price=exit_price,
+                amount_usd=sell_btc * entry_price, btc_qty=sell_btc,
                 stop_loss=risk.stop_loss_price, take_profit=risk.take_profit_price,
                 pnl_usd=net_pnl, gross_pnl_usd=gross_pnl,
                 fees_paid_usd=entry_cost + exit_cost,
@@ -549,6 +570,10 @@ if __name__ == "__main__":
                         metavar="BARS",
                         help="Leakage test: lag predictions by BARS (default 24). "
                              "A real edge must die; good results here = harness bug")
+    parser.add_argument("--offset", type=int, default=0, metavar="MONTHS",
+                        help="Shift the backtest window MONTHS into the past so runs "
+                             "with different offsets form disjoint evidence windows "
+                             "(e.g. --months 3 --offset 3 tests months 6..3 ago)")
     args = parser.parse_args()
 
     import ccxt
@@ -566,15 +591,17 @@ if __name__ == "__main__":
         from ml_signal import MODEL_DIR, train_model
         model_path = MODEL_DIR / "btc_ensemble_v2_holdout.joblib"
         meta_path = MODEL_DIR / "model_meta_v2_holdout.joblib"
-        print(f"\n=== HOLDOUT: training on data ending {args.months} months ago "
+        train_cutoff = args.months + args.offset
+        print(f"\n=== HOLDOUT: training on data ending {train_cutoff} months ago "
               "(causal rule-based regimes; live model untouched) ===")
-        train_model(None, cutoff_months=args.months, regime_method="rules",
+        train_model(None, cutoff_months=train_cutoff, regime_method="rules",
                     model_path=model_path, meta_path=meta_path)
         print("=== Training complete — running OUT-OF-SAMPLE simulation ===\n")
 
     result = run_backtest(exchange, months=args.months,
                           model_path=model_path, meta_path=meta_path,
-                          placebo_lag=args.placebo)
+                          placebo_lag=args.placebo,
+                          offset_months=args.offset)
     print_report(result)
     if args.holdout:
         print("  NOTE: out-of-sample run — the model never saw these candles.")
@@ -612,6 +639,8 @@ if __name__ == "__main__":
                     "slippage_pct": SLIPPAGE_PCT,
                     "testnet": bool(config.TESTNET),
                     "holdout": bool(args.holdout),
+                    "offset_months": args.offset,
+                    "entry_fill": "next_bar_open",
                 },
             )
             print("  Results saved — visible on the dashboard Backtests page.")
