@@ -251,6 +251,20 @@ def save_weekly_review(
     )
 
 
+def get_first_trade_date() -> datetime | None:
+    """Timestamp of the very first trade — used to bootstrap the weekly review."""
+    row = _execute(
+        "SELECT created_at FROM trades ORDER BY created_at ASC LIMIT 1",
+        fetch="one",
+    )
+    if row:
+        ts = row["created_at"]
+        if isinstance(ts, str):
+            return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+        return ts.replace(tzinfo=timezone.utc)
+    return None
+
+
 def get_last_weekly_review_date() -> datetime | None:
     row = _execute(
         "SELECT created_at FROM weekly_reviews ORDER BY created_at DESC LIMIT 1",

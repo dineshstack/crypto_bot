@@ -1,5 +1,5 @@
 """
-Seed Supabase with sample data so the dashboard has something to show.
+Seed MySQL with sample data so the dashboard has something to show.
 """
 from __future__ import annotations
 

@@ -4,7 +4,7 @@ Weekly deep-review module using Claude Opus 4.8.
 Runs once per week (triggered from main.py's loop check).
 Looks at the last 7 days of trades, evaluates performance, and produces:
   - A plain-English performance summary sent to Telegram
-  - 3 new lessons stored in Supabase for future prompt injection
+  - 3 new lessons stored in MySQL for future prompt injection
 
 Uses adaptive thinking so Opus can reason deeply about patterns.
 """
@@ -22,17 +22,24 @@ REVIEW_INTERVAL_DAYS = 7
 
 
 def should_run() -> bool:
-    """Return True if ≥ 7 days have passed since the last review."""
+    """
+    Return True if ≥ 7 days have passed since the last review.
+    On a fresh database (no review yet), fall back to the first trade date so
+    the review loop bootstraps itself once a week of history exists.
+    """
     last = db.get_last_weekly_review_date()
     if last is None:
-        return False
+        first_trade = db.get_first_trade_date()
+        if first_trade is None:
+            return False  # no trades yet — nothing to review
+        return (datetime.now(timezone.utc) - first_trade).days >= REVIEW_INTERVAL_DAYS
     return (datetime.now(timezone.utc) - last).days >= REVIEW_INTERVAL_DAYS
 
 
 def run() -> str:
     """
     Perform the weekly review. Returns a short summary string for Telegram.
-    Saves full review + new lessons to Supabase.
+    Saves full review + new lessons to MySQL.
     """
     now   = datetime.now(timezone.utc)
     start = now - timedelta(days=REVIEW_INTERVAL_DAYS)

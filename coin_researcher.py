@@ -11,7 +11,7 @@ HOW IT WORKS:
      (GitHub commits, stars), community data (Twitter, Reddit), description
   4. Sends all structured data to Claude Opus (adaptive thinking) for a
      scored investment report (0-100) with risks, opportunities, verdict
-  5. Saves report to Supabase; top candidates can be added to watchlist
+  5. Saves report to MySQL; top candidates can be added to watchlist
 
 SCORING DIMENSIONS (each 0–20, total 0–100):
   Team         — transparency, known backgrounds, team size indicators
@@ -424,7 +424,7 @@ Evaluate all dimensions and return the JSON investment report."""
             m = re.search(r"\{.*\}", raw, re.DOTALL)
             report = json.loads(m.group()) if m else {}
 
-        # Attach the raw coin data into the report for Supabase storage
+        # Attach the raw coin data into the report for MySQL storage
         report["coin_id"]      = detail["id"]
         report["symbol"]       = detail["symbol"]
         report["name"]         = detail["name"]
@@ -443,7 +443,7 @@ Evaluate all dimensions and return the JSON investment report."""
         return None
 
 
-# ── Supabase persistence ───────────────────────────────────────────────────
+# ── MySQL persistence ───────────────────────────────────────────────────
 
 def save_research(report: dict) -> str:
     """Save a research report to MySQL. Returns the row ID."""

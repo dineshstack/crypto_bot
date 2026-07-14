@@ -18,8 +18,8 @@ import risk_manager
 logger = logging.getLogger(__name__)
 
 
-def _place_exit_orders(exchange: ccxt.binance, action: str, btc_qty: float,
-                       stop_loss: float, take_profit: float) -> dict:
+def _place_exit_orders(exchange: ccxt.binance, symbol: str, action: str,
+                       qty: float, stop_loss: float, take_profit: float) -> dict:
     """
     Place stop-loss and take-profit exit orders after a market fill.
     After BUY → place SELL stop-loss + SELL take-profit limit.
@@ -28,21 +28,22 @@ def _place_exit_orders(exchange: ccxt.binance, action: str, btc_qty: float,
     """
     result = {"stop_loss_order": None, "take_profit_order": None}
     exit_side = "sell" if action == "buy" else "buy"
+    base = symbol.split("/")[0]
 
     # Stop-loss
     try:
         sl_limit = round(stop_loss * (0.999 if action == "buy" else 1.001), 2)
         result["stop_loss_order"] = exchange.create_order(
-            symbol=config.SYMBOL,
+            symbol=symbol,
             type="STOP_LOSS_LIMIT",
             side=exit_side,
-            amount=btc_qty,
+            amount=qty,
             price=sl_limit,
             params={"stopPrice": round(stop_loss, 2), "timeInForce": "GTC"},
         )
         logger.info(
-            "Stop-loss placed: %s %.6f BTC trigger=$%,.0f limit=$%,.0f",
-            exit_side.upper(), btc_qty, stop_loss, sl_limit,
+            "Stop-loss placed: %s %.6f %s trigger=$%,.0f limit=$%,.0f",
+            exit_side.upper(), qty, base, stop_loss, sl_limit,
         )
     except Exception as exc:
         logger.warning("Stop-loss order failed (non-fatal): %s", exc)
@@ -50,16 +51,16 @@ def _place_exit_orders(exchange: ccxt.binance, action: str, btc_qty: float,
     # Take-profit
     try:
         result["take_profit_order"] = exchange.create_order(
-            symbol=config.SYMBOL,
+            symbol=symbol,
             type="TAKE_PROFIT_LIMIT",
             side=exit_side,
-            amount=btc_qty,
+            amount=qty,
             price=round(take_profit, 2),
             params={"stopPrice": round(take_profit, 2), "timeInForce": "GTC"},
         )
         logger.info(
-            "Take-profit placed: %s %.6f BTC @ $%,.0f",
-            exit_side.upper(), btc_qty, take_profit,
+            "Take-profit placed: %s %.6f %s @ $%,.0f",
+            exit_side.upper(), qty, base, take_profit,
         )
     except Exception as exc:
         logger.warning("Take-profit order failed (non-fatal): %s", exc)
@@ -72,6 +73,10 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
     action = decision["action"]
     confidence = decision.get("confidence", 0.5)
     price = snapshot["price"]
+    # Trade the analysed symbol — the ETH cycle passes ETH/USDT snapshots.
+    # (portfolio["btc"] holds the base-asset amount for whichever symbol this is)
+    symbol = snapshot.get("symbol") or config.SYMBOL
+    base = symbol.split("/")[0]
 
     # Risk manager determines optimal position size and stop levels
     risk = risk_manager.assess_trade(action, confidence, snapshot, portfolio)
@@ -121,21 +126,21 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
 
         btc_qty = amount / price
         try:
-            order = exchange.create_market_buy_order(config.SYMBOL, btc_qty)
+            order = exchange.create_market_buy_order(symbol, btc_qty)
             result.update({
                 "success": True, "amount_usd": amount,
                 "btc_amount": btc_qty, "order": order,
             })
             logger.info(
-                "BUY %.6f BTC for $%.2f @ $%,.0f | SL=$%,.0f TP=$%,.0f R:R=%.1f",
-                btc_qty, amount, price,
+                "BUY %.6f %s for $%.2f @ $%,.0f | SL=$%,.0f TP=$%,.0f R:R=%.1f",
+                btc_qty, base, amount, price,
                 risk.stop_loss_price, risk.take_profit_price, risk.risk_reward_ratio,
             )
 
             # Place stop-loss order on exchange (non-blocking)
             if risk.stop_loss_price > 0:
                 exit_orders = _place_exit_orders(
-                    exchange, action, btc_qty,
+                    exchange, symbol, action, btc_qty,
                     risk.stop_loss_price, risk.take_profit_price,
                 )
                 result["stop_order"] = exit_orders.get("stop_loss_order")
@@ -147,14 +152,14 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
 
     elif action == "sell":
         if portfolio["btc"] <= 0:
-            result["error"] = "No BTC to sell"
+            result["error"] = f"No {base} to sell"
             return result
 
         # Risk-managed sell: use recommended amount or 10% of holdings, whichever is less
         sell_usd = min(amount, portfolio["btc"] * price * 0.10)
         btc_qty = sell_usd / price
 
-        min_qty = (exchange.markets.get(config.SYMBOL, {})
+        min_qty = (exchange.markets.get(symbol, {})
                    .get("limits", {}).get("amount", {}).get("min", 0.00001))
         if btc_qty < min_qty:
             result["error"] = f"Sell qty {btc_qty:.8f} below minimum {min_qty}"
@@ -162,19 +167,19 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
             return result
 
         try:
-            order = exchange.create_market_sell_order(config.SYMBOL, btc_qty)
+            order = exchange.create_market_sell_order(symbol, btc_qty)
             result.update({
                 "success": True, "amount_usd": sell_usd,
                 "btc_amount": btc_qty, "order": order,
             })
             logger.info(
-                "SELL %.6f BTC for $%.2f @ $%,.0f | SL=$%,.0f",
-                btc_qty, sell_usd, price, risk.stop_loss_price,
+                "SELL %.6f %s for $%.2f @ $%,.0f | SL=$%,.0f",
+                btc_qty, base, sell_usd, price, risk.stop_loss_price,
             )
 
             if risk.stop_loss_price > 0:
                 exit_orders = _place_exit_orders(
-                    exchange, action, btc_qty,
+                    exchange, symbol, action, btc_qty,
                     risk.stop_loss_price, risk.take_profit_price,
                 )
                 result["stop_order"] = exit_orders.get("stop_loss_order")

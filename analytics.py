@@ -1,7 +1,7 @@
 """
 Performance analytics engine — tracks and reports trading metrics.
 
-Computes from Supabase trade history and portfolio snapshots:
+Computes from MySQL trade history and portfolio snapshots:
   - PnL (realized + unrealized)
   - Win rate, profit factor, expectancy
   - Sharpe ratio, Sortino ratio

@@ -5,7 +5,7 @@ Claude (Haiku) analyses market data + world news every 4h and decides:
   buy / hold / sell  →  Python executes with hard safety limits.
 
 Features:
-  - Supabase persistent storage (trades, snapshots, lessons, reviews, research)
+  - MySQL persistent storage (trades, snapshots, lessons, reviews, research)
   - World news context: crypto, macro, gold headlines injected every cycle
   - Self-correction: evaluates past trades, generates lessons for future cycles
   - Historical context: last 5 decisions injected into Claude's prompt
@@ -615,6 +615,12 @@ async def run_eth_cycle():
     """ETH analysis cycle — runs after BTC cycle each interval."""
     global bot_active
 
+    # A circuit breaker or stop-loss may have halted the bot during the BTC
+    # cycle — never trade ETH after a halt.
+    if not bot_active:
+        logger.info("ETH cycle skipped — bot halted during BTC cycle")
+        return
+
     logger.info("── ETH analysis cycle start ──")
     try:
         eth_sym = "ETH/USDT"
@@ -641,11 +647,45 @@ async def run_eth_cycle():
         }
         decision = claude_analyzer.analyze(snap, eth_port, exchange=exchange)
 
+        # Timeframe consensus gate — same rule as the BTC cycle
+        tf_direction = snap.get("tf_direction", "mixed")
+        tf_agreement = snap.get("tf_agreement", 0)
+        if decision["action"] in ("buy", "sell") and tf_agreement < 2:
+            action_dir = "bullish" if decision["action"] == "buy" else "bearish"
+            if tf_direction != action_dir:
+                original_action = decision["action"]
+                decision["action"] = "hold"
+                decision["reason"] = (
+                    f"Timeframe gate: only {tf_agreement}/3 timeframes agree ({tf_direction}) "
+                    f"— {original_action} blocked. Original: {decision['reason']}"
+                )
+                logger.info(
+                    "ETH timeframe gate: blocked %s — %d/3 TFs agree, direction=%s",
+                    original_action, tf_agreement, tf_direction,
+                )
+                db.log_event("timeframe_gate",
+                             f"ETH blocked {original_action}: {tf_agreement}/3 agree, {tf_direction}",
+                             data={"symbol": eth_sym,
+                                   "tf_1h": snap.get("tf_regime_1h"),
+                                   "tf_4h": snap.get("tf_regime_4h"),
+                                   "tf_1d": snap.get("tf_regime_1d")})
+
         # Override trade limits with ETH-specific config
         decision["trade_usd"] = max(
             eth_cfg["min_trade_usd"],
             min(eth_cfg["max_trade_usd"], float(decision.get("trade_usd", eth_cfg["base_trade_usd"]))),
         )
+
+        # Apply circuit-breaker sizing scale (halved in drawdown — same as BTC)
+        if _sizing_scale < 1.0 and decision["action"] in ("buy", "sell"):
+            original_usd = decision["trade_usd"]
+            decision["trade_usd"] = max(
+                eth_cfg["min_trade_usd"], round(original_usd * _sizing_scale, 2)
+            )
+            logger.info(
+                "ETH sizing scale %.0f%% applied: $%.2f → $%.2f",
+                _sizing_scale * 100, original_usd, decision["trade_usd"],
+            )
 
         # Block buy if ETH allocation already at max
         if decision["action"] == "buy" and eth_alloc >= eth_cfg["max_alloc_pct"]:

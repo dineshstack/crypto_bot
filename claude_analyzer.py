@@ -382,7 +382,7 @@ def _parse_json(raw: str, defaults: dict) -> dict:
 
 
 def _build_context_sections() -> str:
-    """Load lessons and recent decision history from Supabase."""
+    """Load lessons and recent decision history from MySQL."""
     sections = []
 
     lessons = db.get_active_lessons(5)

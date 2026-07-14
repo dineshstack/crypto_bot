@@ -18,6 +18,7 @@ from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import OnBalanceVolumeIndicator, VolumeWeightedAveragePrice
 
 import config
+import market_data
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,9 @@ def get_asset_snapshot(exchange: ccxt.binance, symbol: str) -> dict:
         "long_pct": deriv["long_pct"],
         "short_pct": deriv["short_pct"],
     }
+
+    # Multi-timeframe regime consensus (same gate inputs as the BTC cycle)
+    snap.update(market_data.compute_timeframe_consensus(df))
 
     return snap
 

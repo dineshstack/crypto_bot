@@ -21,11 +21,11 @@ def header(title: str):
     print(f"{'='*60}\n")
 
 
-def test_supabase():
-    header("1/6  SUPABASE CONNECTION")
+def test_database():
+    header("1/6  MYSQL CONNECTION")
     import database as db
     db.init()
-    print("  ✅ Supabase connected\n")
+    print("  ✅ MySQL connected\n")
 
     lessons = db.get_active_lessons(5)
     print(f"  Active lessons: {len(lessons)}")
@@ -144,7 +144,7 @@ def test_logging(decision, snap):
                  data={"action": decision["action"],
                        "price": snap["price"],
                        "confidence": decision["confidence"]})
-    print("  ✅ Event logged to Supabase\n")
+    print("  ✅ Event logged to MySQL\n")
 
 
 def main():
@@ -153,8 +153,8 @@ def main():
     print("🤖" * 30)
 
     try:
-        # 1. Supabase
-        test_supabase()
+        # 1. MySQL
+        test_database()
 
         # 2. Binance + market data
         exchange, snap, port = test_binance()
