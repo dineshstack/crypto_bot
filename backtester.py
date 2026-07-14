@@ -447,6 +447,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backtest the trading bot strategy")
     parser.add_argument("--months", type=int, default=3, help="Months of history to test")
     parser.add_argument("--csv", action="store_true", help="Save equity curve CSV")
+    parser.add_argument("--no-db", action="store_true", help="Skip saving results to the dashboard DB")
     args = parser.parse_args()
 
     import ccxt
@@ -464,3 +465,34 @@ if __name__ == "__main__":
 
     if args.csv:
         save_equity_csv(result)
+
+    if not args.no_db:
+        try:
+            import database
+            curve = result.equity_curve
+            day = lambda point: pd.Timestamp(point["ts"]).strftime("%Y-%m-%d")
+            database.save_backtest_run(
+                period_months=args.months,
+                start_date=day(curve[0]) if curve else None,
+                end_date=day(curve[-1]) if curve else None,
+                total_trades=result.total_trades,
+                wins=result.wins,
+                losses=result.losses,
+                win_rate=result.win_rate,
+                sharpe_ratio=result.sharpe_ratio,
+                sortino_ratio=result.sortino_ratio,
+                max_drawdown_pct=result.max_drawdown_pct,
+                profit_factor=result.profit_factor,
+                total_return_pct=result.total_return_pct,
+                equity_curve=[round(p["equity"], 2) for p in curve],
+                config_snapshot={
+                    "months": args.months,
+                    "initial_capital": INITIAL_CAPITAL,
+                    "trading_fee_pct": TRADING_FEE_PCT,
+                    "slippage_pct": SLIPPAGE_PCT,
+                    "testnet": bool(config.TESTNET),
+                },
+            )
+            print("  Results saved — visible on the dashboard Backtests page.")
+        except Exception as exc:
+            print(f"  WARNING: could not save results to dashboard DB: {exc}")

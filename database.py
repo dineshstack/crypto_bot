@@ -251,6 +251,38 @@ def save_weekly_review(
     )
 
 
+def save_backtest_run(
+    period_months:    int,
+    start_date:       str | None,
+    end_date:         str | None,
+    total_trades:     int,
+    wins:             int,
+    losses:           int,
+    win_rate:         float,
+    sharpe_ratio:     float,
+    sortino_ratio:    float,
+    max_drawdown_pct: float,
+    profit_factor:    float,
+    total_return_pct: float,
+    equity_curve:     list[float] | None = None,
+    config_snapshot:  dict | None = None,
+):
+    """Persist a backtest run so the dashboard Backtests page can list it.
+    win_rate is a 0–1 fraction (the dashboard multiplies by 100)."""
+    _execute(
+        """INSERT INTO backtest_runs
+           (period_months, start_date, end_date, total_trades, wins, losses,
+            win_rate, sharpe_ratio, sortino_ratio, max_drawdown_pct,
+            profit_factor, total_return_pct, equity_curve, config_snapshot)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+        (period_months, start_date, end_date, total_trades, wins, losses,
+         win_rate, sharpe_ratio, sortino_ratio, max_drawdown_pct,
+         profit_factor, total_return_pct,
+         json.dumps(equity_curve) if equity_curve is not None else None,
+         json.dumps(config_snapshot) if config_snapshot is not None else None),
+    )
+
+
 def get_first_trade_date() -> datetime | None:
     """Timestamp of the very first trade — used to bootstrap the weekly review."""
     row = _execute(
