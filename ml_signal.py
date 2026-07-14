@@ -539,7 +539,10 @@ def derive_trade_thresholds(oos_proba: np.ndarray, oos_y: np.ndarray,
             p_win = float((y_sig == win_class).mean())
             p_lose = float((y_sig == lose_class).mean())
             ev = p_win * win_pct - p_lose * lose_pct - round_trip_cost_pct
-            if ev > best_ev:
+            # EV floor: a side with no positive-EV threshold is DISABLED
+            # (threshold None). Trading the least-bad gate turned the 9-month
+            # holdout into buy-every-bar at EV −0.33%/trade. Cash is a position.
+            if ev > best_ev and ev > 0:
                 best_t, best_ev, best_n = round(float(t), 3), ev, n
         out[side] = {
             "threshold": best_t,
@@ -571,11 +574,13 @@ def train_model(exchange, cutoff_months: int = 0, regime_method: str = "auto",
     logger.info("ML v2: Fetching 5000+ candles across 3 timeframes...")
     import ccxt
     data_exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "spot"}})
-    df_1h = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "1h", total_candles=8000)
+    # 3 years of history: long holdouts previously starved the training set
+    # (a 9-month cutoff on 8000 candles left 1,318 samples → junk model)
+    df_1h = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "1h", total_candles=26280)
     time.sleep(1)
-    df_4h = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "4h", total_candles=2000)
+    df_4h = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "4h", total_candles=6570)
     time.sleep(1)
-    df_1d = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "1d", total_candles=500)
+    df_1d = fetch_ohlcv_paginated(data_exchange, "BTC/USDT", "1d", total_candles=1160)
     logger.info("ML v2: Fetched 1h=%d, 4h=%d, 1d=%d candles",
                 len(df_1h), len(df_4h), len(df_1d))
 
@@ -791,12 +796,17 @@ def train_model(exchange, cutoff_months: int = 0, regime_method: str = "auto",
     meta_model.fit(meta_X, meta_y)
 
     # ── Decision gates from OOS expected value (replaces hardcoded 0.55) ────
+    # threshold None means the side found no positive-EV gate → disabled.
     thresholds = derive_trade_thresholds(meta_model.predict_proba(meta_X), meta_y)
-    buy_threshold = thresholds["buy"]["threshold"] or 0.55
-    sell_threshold = thresholds["sell"]["threshold"] or 0.55
+    buy_threshold = thresholds["buy"]["threshold"]
+    sell_threshold = thresholds["sell"]["threshold"]
+    for side, t in (("BUY", buy_threshold), ("SELL", sell_threshold)):
+        if t is None:
+            logger.warning("ML v2: %s side DISABLED — no positive-EV threshold "
+                           "out-of-sample (cash is a position)", side)
     logger.info(
-        "ML v2: OOS-derived gates — buy>%.3f (EV %s%%/trade, %s signals), "
-        "sell>%.3f (EV %s%%/trade, %s signals)",
+        "ML v2: OOS-derived gates — buy>%s (EV %s%%/trade, %s signals), "
+        "sell>%s (EV %s%%/trade, %s signals)",
         buy_threshold, thresholds["buy"]["ev_pct_per_trade"], thresholds["buy"]["oos_signals"],
         sell_threshold, thresholds["sell"]["ev_pct_per_trade"], thresholds["sell"]["oos_signals"],
     )
@@ -1013,11 +1023,12 @@ def predict(exchange) -> dict:
             "ml_model_accuracy": meta.get("cv_accuracy"),
             "ml_regime": current_regime,
             "ml_available": True,
-            # OOS-derived gates: a probability only means "trade" relative to these
+            # OOS-derived gates: a probability only means "trade" relative to
+            # these. A None threshold = side disabled (no positive-EV gate).
             "ml_buy_threshold": ensemble.get("buy_threshold"),
             "ml_sell_threshold": ensemble.get("sell_threshold"),
-            "ml_buy_signal": prob_buy > ensemble.get("buy_threshold", 1.0),
-            "ml_sell_signal": prob_sell > ensemble.get("sell_threshold", 1.0),
+            "ml_buy_signal": prob_buy > (ensemble.get("buy_threshold") or 2.0),
+            "ml_sell_signal": prob_sell > (ensemble.get("sell_threshold") or 2.0),
         })
 
         logger.info(

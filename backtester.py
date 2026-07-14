@@ -214,9 +214,17 @@ def run_backtest(exchange, months: int = 3,
             df["ml_sell_prob"] = final_proba[:, 0] if final_proba.shape[1] > 0 else 0
             ml_available = True
             # Gates derived from OOS expected value at train time — a fixed
-            # 0.55 sits ~4x above what a 6%-prevalence class can produce
-            buy_gate = ensemble.get("buy_threshold", 0.55)
-            sell_gate = ensemble.get("sell_threshold", 0.55)
+            # 0.55 sits ~4x above what a 6%-prevalence class can produce.
+            # None means the side had no positive-EV gate → disabled (2.0
+            # can never fire; probabilities are bounded by 1).
+            buy_gate = ensemble.get("buy_threshold")
+            sell_gate = ensemble.get("sell_threshold")
+            if buy_gate is None:
+                logger.warning("Backtest: BUY side DISABLED — no positive-EV gate at train time")
+                buy_gate = 2.0
+            if sell_gate is None:
+                logger.warning("Backtest: SELL side DISABLED — no positive-EV gate at train time")
+                sell_gate = 2.0
             logger.info(
                 "Backtest: ML model loaded — ensemble predictions, "
                 "gates buy>%.3f sell>%.3f", buy_gate, sell_gate,
