@@ -232,10 +232,16 @@ def confidence_multiplier(confidence: float) -> float:
 # ── Main Risk Assessment ─────────────────────────────────────────────────────
 
 def assess_trade(action: str, confidence: float, snapshot: dict,
-                 portfolio: dict) -> TradeRisk:
+                 portfolio: dict, stats: dict | None = None,
+                 use_rl: bool = True,
+                 consecutive_losses: int | None = None) -> TradeRisk:
     """
     Full risk assessment for a proposed trade.
     Returns recommended size, stop/take-profit levels, and rationale.
+
+    Backtests must pass `stats` (neutral defaults), `use_rl=False` and
+    `consecutive_losses=0`: the defaults read the LIVE database and RL
+    state, which would leak live-account history into simulations.
     """
     price = snapshot["price"]
     atr = snapshot.get("atr", price * 0.015)  # fallback 1.5% if missing
@@ -251,7 +257,7 @@ def assess_trade(action: str, confidence: float, snapshot: dict,
         )
 
     # 1. Get trade statistics for Kelly
-    stats = _get_trade_stats()
+    stats = stats or _get_trade_stats()
     kf = kelly_fraction(
         stats["win_rate"], stats["avg_win_pct"], stats["avg_loss_pct"],
         total_trades=stats["total_trades"],
@@ -273,6 +279,8 @@ def assess_trade(action: str, confidence: float, snapshot: dict,
     rl_scale = 1.0
     rl_action = "hold"
     try:
+        if not use_rl:
+            raise LookupError("RL disabled (backtest)")
         rl_rec = rl_position.get_recommendation(snapshot, portfolio)
         rl_action = rl_rec.action
         if rl_action == "increase" and action == "buy":
@@ -292,7 +300,7 @@ def assess_trade(action: str, confidence: float, snapshot: dict,
     final_usd = max(config.MIN_TRADE_USD, min(config.MAX_TRADE_USD, sized_usd))
 
     # 8. Regime-aware stops
-    consec_losses = _get_consecutive_losses()
+    consec_losses = consecutive_losses if consecutive_losses is not None else _get_consecutive_losses()
     sl_mult, tp_mult = _atr_stop_multipliers(atr_pct, consec_losses)
     stops = calculate_stops(price, atr, action,
                             sl_multiplier=sl_mult, tp_multiplier=tp_mult)

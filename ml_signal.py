@@ -374,15 +374,20 @@ def _apply_persistence_filter(regimes: pd.Series, min_bars: int = PERSISTENCE_BA
     return filtered
 
 
-def detect_regime(df: pd.DataFrame) -> pd.Series:
+def detect_regime(df: pd.DataFrame, method: str = "auto") -> pd.Series:
     """
     Detect market regime using HMM + persistence filter.
     Falls back to rule-based classification if HMM fails.
+
+    method="rules" skips the HMM. The HMM fits on the WHOLE window, so a
+    bar's regime label is informed by candles after it — fine for offline
+    analysis, look-ahead leakage inside a backtest. Rule-based labels use
+    only trailing indicators and are causal.
     """
     features = _compute_regime_features(df)
 
     # Try HMM first
-    hmm_regimes = _fit_hmm_regimes(features)
+    hmm_regimes = _fit_hmm_regimes(features) if method != "rules" else pd.Series(dtype=object)
 
     if not hmm_regimes.empty and len(hmm_regimes) > 50:
         filtered = _apply_persistence_filter(hmm_regimes)
@@ -544,12 +549,21 @@ def derive_trade_thresholds(oos_proba: np.ndarray, oos_y: np.ndarray,
     return out
 
 
-def train_model(exchange) -> dict:
+def train_model(exchange, cutoff_months: int = 0, regime_method: str = "auto",
+                model_path=None, meta_path=None) -> dict:
+    """
+    cutoff_months > 0 discards the most recent N months before training so a
+    backtest over those months is genuinely out-of-sample. Holdout runs save
+    to their own model_path/meta_path to avoid clobbering the live model.
+    """
     import xgboost as xgb
     import lightgbm as lgb
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, f1_score, classification_report
     from sklearn.preprocessing import LabelEncoder
+
+    model_path = model_path or MODEL_PATH
+    meta_path = meta_path or META_PATH
 
     logger.info("ML v2: === TRAINING PIPELINE START ===")
 
@@ -565,6 +579,18 @@ def train_model(exchange) -> dict:
     logger.info("ML v2: Fetched 1h=%d, 4h=%d, 1d=%d candles",
                 len(df_1h), len(df_4h), len(df_1d))
 
+    if cutoff_months > 0:
+        cutoff_ms = int(time.time() * 1000) - cutoff_months * 30 * 24 * 3600 * 1000
+        n_before = len(df_1h)
+        df_1h = df_1h[df_1h["ts"] < cutoff_ms].reset_index(drop=True)
+        df_4h = df_4h[df_4h["ts"] < cutoff_ms].reset_index(drop=True)
+        df_1d = df_1d[df_1d["ts"] < cutoff_ms].reset_index(drop=True)
+        train_end = (pd.Timestamp(df_1h["ts"].iloc[-1], unit="ms").date()
+                     if len(df_1h) else "n/a")
+        logger.info("ML v2: HOLDOUT — dropped the last %d months "
+                    "(1h candles %d→%d, training ends %s)",
+                    cutoff_months, n_before, len(df_1h), train_end)
+
     # ── 3. Multi-timeframe feature engineering ──
     logger.info("ML v2: Engineering multi-timeframe features...")
     df = engineer_features(df_1h, df_4h, df_1d)
@@ -574,7 +600,7 @@ def train_model(exchange) -> dict:
     df["target"] = triple_barrier_label(df)
 
     # ── 4. Regime detection ──
-    regime = detect_regime(df)
+    regime = detect_regime(df, method=regime_method)
     df["regime"] = regime
     regime_df = encode_regime(regime)
     for col in regime_df.columns:
@@ -843,9 +869,9 @@ def train_model(exchange) -> dict:
         "buy_threshold": buy_threshold,
         "sell_threshold": sell_threshold,
     }
-    joblib.dump(ensemble, MODEL_PATH)
+    joblib.dump(ensemble, model_path)
 
-    current_regime = detect_regime(df_1h).iloc[-1]
+    current_regime = detect_regime(df_1h, method=regime_method).iloc[-1]
 
     meta = {
         "version": "v2_ensemble",
@@ -870,8 +896,10 @@ def train_model(exchange) -> dict:
         "buy_threshold": buy_threshold,
         "sell_threshold": sell_threshold,
         "threshold_details": thresholds,
+        "cutoff_months": cutoff_months,
+        "regime_method": regime_method,
     }
-    joblib.dump(meta, META_PATH)
+    joblib.dump(meta, meta_path)
 
     logger.info(
         "ML v2: === TRAINING COMPLETE ===\n"
@@ -889,12 +917,14 @@ def train_model(exchange) -> dict:
 # INFERENCE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _load_model():
-    if not MODEL_PATH.exists():
+def _load_model(model_path=None, meta_path=None):
+    model_path = model_path or MODEL_PATH
+    meta_path = meta_path or META_PATH
+    if not model_path.exists():
         return None, None
     try:
-        ensemble = joblib.load(MODEL_PATH)
-        meta = joblib.load(META_PATH) if META_PATH.exists() else {}
+        ensemble = joblib.load(model_path)
+        meta = joblib.load(meta_path) if meta_path.exists() else {}
         return ensemble, meta
     except Exception as exc:
         logger.error("ML v2: Load failed: %s", exc)

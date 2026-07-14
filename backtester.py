@@ -143,11 +143,22 @@ def _simulate_trade_exit(candles: pd.DataFrame, entry_idx: int,
     return exit_idx, candles.iloc[exit_idx]["close"], "time_exit"
 
 
-def run_backtest(exchange, months: int = 3) -> BacktestResult:
+# Sizing inputs for simulations: risk_manager defaults read the LIVE
+# database (recent trades, consecutive losses, RL state) which must not
+# leak into a backtest.
+BACKTEST_TRADE_STATS = {
+    "win_rate": 0.5, "avg_win_pct": 1.5, "avg_loss_pct": 1.5,
+    "total_trades": 0, "wins": 0, "losses": 0,
+}
+
+
+def run_backtest(exchange, months: int = 3,
+                 model_path=None, meta_path=None) -> BacktestResult:
     """
     Run full backtest simulation.
     Uses ML model predictions if available, otherwise falls back to
-    simple indicator-based signals.
+    simple indicator-based signals. Pass model_path/meta_path to simulate
+    with a holdout-trained model instead of the live one.
     """
     logger.info("Backtest: Fetching %d months of data...", months)
     df_1h, df_4h, df_1d = fetch_backtest_data(exchange, months)
@@ -158,18 +169,27 @@ def run_backtest(exchange, months: int = 3) -> BacktestResult:
     logger.info("Backtest: 1h=%d, 4h=%d, 1d=%d candles loaded. Engineering features...",
                 len(df_1h), len(df_4h), len(df_1d))
     df = engineer_features(df_1h, df_4h, df_1d)
-    df["regime"] = detect_regime(df)
+
+    # Load the model before regime detection so the backtest labels regimes
+    # the same way training did (HMM vs causal rules — see detect_regime).
+    ensemble, meta = None, None
+    try:
+        from ml_signal import _load_model
+        ensemble, meta = _load_model(model_path, meta_path)
+    except Exception as exc:
+        logger.info("Backtest: model load failed: %s", exc)
+
+    regime_method = (meta or {}).get("regime_method", "auto")
+    df["regime"] = detect_regime(df, method=regime_method)
     # Same regime one-hots the model was trained with (regime_is_* features)
     regime_df = encode_regime(df["regime"])
     for col in regime_df.columns:
         df[col] = regime_df[col]
 
-    # Try loading trained ML model for predictions
+    # Use trained ML model predictions if available
     ml_available = False
     buy_gate = sell_gate = 0.55  # fallback for indicator signals (prob set to 0.65)
     try:
-        from ml_signal import _load_model
-        ensemble, meta = _load_model()
         if ensemble and meta:
             selected = ensemble["selected_features"]
             missing = [f for f in selected if f not in df.columns]
@@ -264,7 +284,10 @@ def run_backtest(exchange, months: int = 3) -> BacktestResult:
         # Risk-managed sizing
         snapshot = {"price": price, "atr": atr_val, "atr_pct": atr_pct}
         portfolio = {"usdt": usdt, "btc": btc}
-        risk = risk_manager.assess_trade(action, confidence, snapshot, portfolio)
+        risk = risk_manager.assess_trade(
+            action, confidence, snapshot, portfolio,
+            stats=BACKTEST_TRADE_STATS, use_rl=False, consecutive_losses=0,
+        )
         amount = risk.recommended_usd
 
         # Cost rate per side: taker fee + slippage
@@ -473,6 +496,9 @@ if __name__ == "__main__":
     parser.add_argument("--months", type=int, default=3, help="Months of history to test")
     parser.add_argument("--csv", action="store_true", help="Save equity curve CSV")
     parser.add_argument("--no-db", action="store_true", help="Skip saving results to the dashboard DB")
+    parser.add_argument("--holdout", action="store_true",
+                        help="Out-of-sample: retrain a model on data ending --months ago, "
+                             "then backtest those months with candles the model never saw")
     args = parser.parse_args()
 
     import ccxt
@@ -485,8 +511,22 @@ if __name__ == "__main__":
     if config.TESTNET:
         exchange.set_sandbox_mode(True)
 
-    result = run_backtest(exchange, months=args.months)
+    model_path = meta_path = None
+    if args.holdout:
+        from ml_signal import MODEL_DIR, train_model
+        model_path = MODEL_DIR / "btc_ensemble_v2_holdout.joblib"
+        meta_path = MODEL_DIR / "model_meta_v2_holdout.joblib"
+        print(f"\n=== HOLDOUT: training on data ending {args.months} months ago "
+              "(causal rule-based regimes; live model untouched) ===")
+        train_model(None, cutoff_months=args.months, regime_method="rules",
+                    model_path=model_path, meta_path=meta_path)
+        print("=== Training complete — running OUT-OF-SAMPLE simulation ===\n")
+
+    result = run_backtest(exchange, months=args.months,
+                          model_path=model_path, meta_path=meta_path)
     print_report(result)
+    if args.holdout:
+        print("  NOTE: out-of-sample run — the model never saw these candles.")
 
     if args.csv:
         save_equity_csv(result)
@@ -495,7 +535,7 @@ if __name__ == "__main__":
         try:
             import database
             curve = result.equity_curve
-            day = lambda point: pd.Timestamp(point["ts"]).strftime("%Y-%m-%d")
+            day = lambda point: pd.Timestamp(point["ts"], unit="ms").strftime("%Y-%m-%d")
             database.save_backtest_run(
                 period_months=args.months,
                 start_date=day(curve[0]) if curve else None,
@@ -516,6 +556,7 @@ if __name__ == "__main__":
                     "trading_fee_pct": TRADING_FEE_PCT,
                     "slippage_pct": SLIPPAGE_PCT,
                     "testnet": bool(config.TESTNET),
+                    "holdout": bool(args.holdout),
                 },
             )
             print("  Results saved — visible on the dashboard Backtests page.")
