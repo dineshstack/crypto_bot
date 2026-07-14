@@ -38,6 +38,18 @@ gain per hour of work.
 **Exit criterion:** edge confirmed (positive net expectancy in ≥3 disjoint
 windows per G2/G3) → Phase 1. Edge dead → strategy redesign, not more infra.
 
+**Status 2026-07-14 (late):** validation gauntlet passed —
+- placebo test (24-bar prediction lag) killed the edge: 92.5%→16.7% WR → harness clean
+- all 40 ledger trades independently verified against real Binance candles (0 failures)
+- three DISJOINT 3-month windows under next-bar-open fills, independently
+  trained holdout models: 10-0, 13-1, 10-1 (33W/2L combined, ~+0.3% net/window,
+  B&H −11..−19% each). Strategy identity: rare extreme-momentum session-open
+  bounce scalps (~4 trades/month, gates ~0.9).
+- Open before G3: all windows are 2025-10..2026-07 bear/chop — no bull-tape
+  evidence yet; 35 trades ≪ 300; absolute returns tiny at current sizing.
+- Next: walk offset windows back through 2023-24 bull (regime diversity +
+  trade count), retrain live model, accumulate forward paper evidence.
+
 ## Phase 1 — Institutional risk layer
 
 - Daily / weekly loss limits with a circuit breaker that halts the cycle.
