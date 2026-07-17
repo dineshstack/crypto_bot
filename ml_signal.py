@@ -927,6 +927,28 @@ def train_model(exchange, cutoff_months: int = 0, regime_method: str = "auto",
 # INFERENCE
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_DATA_EXCHANGE = None
+
+
+def _market_data_exchange():
+    """
+    Public PRODUCTION Binance client for OHLCV at inference time.
+
+    The trading exchange may be the sandbox, whose prices track loosely but
+    whose volumes run ~30x below real — poisoning every volume-derived
+    feature relative to the training distribution and freezing predictions
+    (observed live: ml_probability pinned at 0.029 for 3 days). Training
+    already fetches from production; inference must match.
+    """
+    global _DATA_EXCHANGE
+    if _DATA_EXCHANGE is None:
+        import ccxt
+        _DATA_EXCHANGE = ccxt.binance(
+            {"enableRateLimit": True, "options": {"defaultType": "spot"}}
+        )
+    return _DATA_EXCHANGE
+
+
 def _load_model(model_path=None, meta_path=None):
     model_path = model_path or MODEL_PATH
     meta_path = meta_path or META_PATH
@@ -960,18 +982,21 @@ def predict(exchange) -> dict:
         return result
 
     try:
+        # Market data always from production Binance — never the sandbox
+        # (see _market_data_exchange). `exchange` stays the trading venue.
+        data_ex = _market_data_exchange()
         df_1h = pd.DataFrame(
-            exchange.fetch_ohlcv("BTC/USDT", "1h", limit=200),
+            data_ex.fetch_ohlcv("BTC/USDT", "1h", limit=200),
             columns=["ts", "open", "high", "low", "close", "volume"],
         )
         time.sleep(0.5)
         df_4h = pd.DataFrame(
-            exchange.fetch_ohlcv("BTC/USDT", "4h", limit=100),
+            data_ex.fetch_ohlcv("BTC/USDT", "4h", limit=100),
             columns=["ts", "open", "high", "low", "close", "volume"],
         )
         time.sleep(0.5)
         df_1d = pd.DataFrame(
-            exchange.fetch_ohlcv("BTC/USDT", "1d", limit=60),
+            data_ex.fetch_ohlcv("BTC/USDT", "1d", limit=60),
             columns=["ts", "open", "high", "low", "close", "volume"],
         )
 
