@@ -34,7 +34,9 @@ class BreakerHarness(unittest.TestCase):
         }
         main.notify = fake_notify
         main.db.log_event = lambda *a, **k: self.events.append(a)
-        main.db.set_state = lambda k, v: self.halts.append(f"{k}={v}")
+        # risk_status is per-check telemetry, not a halt — keep it out of halts
+        main.db.set_state = lambda k, v: (
+            self.halts.append(f"{k}={v}") if k != "risk_status" else None)
         main.db.get_recent_trades = lambda n=10: []
         main.db.get_snapshots = lambda limit=20: []
 
