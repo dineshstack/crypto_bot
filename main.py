@@ -874,20 +874,21 @@ def _auth(update: Update) -> bool:
 
 # ── Telegram command handlers ───────────────────────────────────────────────
 
-async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
+async def _start_trading() -> str:
+    """
+    Initialise circuit-breaker baselines, websocket streams and the analysis
+    loop. Shared by the /start command and process-boot auto-start.
+    Caller must ensure the loop is not already active.
+    Returns the human-readable status message.
+    """
     global bot_active, analysis_loop, baseline_usd, _ws_tasks
-    if not _auth(update):
-        return
-    if bot_active:
-        await update.message.reply_text("Bot is already running.")
-        return
+    global _session_peak_usd, _daily_start_usd, _daily_date, _sizing_scale
 
     port = md.get_portfolio(exchange)
     snap = md.get_market_snapshot(exchange)
     baseline_usd = port["usdt"] + port["btc"] * snap["price"]
 
     # Initialise circuit-breaker baselines for this session
-    global _session_peak_usd, _daily_start_usd, _daily_date, _sizing_scale
     _session_peak_usd = baseline_usd
     _daily_start_usd  = baseline_usd
     _daily_date       = datetime.date.today().isoformat()
@@ -900,18 +901,56 @@ async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     bot_active    = True
     analysis_loop = asyncio.create_task(_loop())
 
+    logger.info("Bot started. Baseline: $%.2f", baseline_usd)
+    db.log_event("bot_start", f"Bot started — baseline ${baseline_usd:.2f}",
+                 data={"mode": "TESTNET" if config.TESTNET else "LIVE",
+                       "baseline": baseline_usd})
+
     mode = "TESTNET" if config.TESTNET else "🔴 LIVE — trades need your approval"
-    await update.message.reply_text(
+    return (
         f"✅ Bot started ({mode})\n"
         f"Portfolio: ${baseline_usd:.2f}\n"
         f"Interval: {config.ANALYSIS_INTERVAL_HOURS}h | "
         f"Stop-loss: -{config.STOP_LOSS_PCT:.0%}\n"
         f"WebSocket: real-time price + anomaly detection active"
     )
-    logger.info("Bot started. Baseline: $%.2f", baseline_usd)
-    db.log_event("bot_start", f"Bot started — baseline ${baseline_usd:.2f}",
-                 data={"mode": "TESTNET" if config.TESTNET else "LIVE",
-                       "baseline": baseline_usd})
+
+
+async def _post_init(app: Application):
+    """
+    Auto-start the trading loop when the process boots.
+
+    Without this, every systemd restart left the bot ALIVE BUT IDLE until a
+    human sent /start in Telegram (observed live: 20h of zero cycles after a
+    restart while telegram polling kept the process looking healthy).
+    Opt out with BOT_AUTO_START=false.
+    """
+    import os
+    if os.getenv("BOT_AUTO_START", "true").lower() not in ("1", "true", "yes"):
+        logger.info("Auto-start disabled (BOT_AUTO_START) — waiting for /start")
+        return
+    if bot_active:
+        return
+    text = await _start_trading()
+    logger.info("Auto-started trading loop on process boot")
+    try:
+        await app.bot.send_message(
+            chat_id=config.TELEGRAM_CHAT_ID,
+            text="♻️ Bot process restarted — trading loop auto-started.\n\n" + text,
+        )
+    except Exception as exc:
+        logger.warning("Auto-start Telegram notify failed: %s", exc)
+
+
+async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
+    if not _auth(update):
+        return
+    if bot_active:
+        await update.message.reply_text("Bot is already running.")
+        return
+
+    text = await _start_trading()
+    await update.message.reply_text(text)
 
 
 async def cmd_stop(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
@@ -1312,7 +1351,7 @@ def main():
     if not config.TESTNET:
         logger.warning("LIVE MODE — every buy/sell will require Telegram confirmation")
 
-    tg_app = Application.builder().token(config.TELEGRAM_TOKEN).build()
+    tg_app = Application.builder().token(config.TELEGRAM_TOKEN).post_init(_post_init).build()
     tg_app.add_handler(CommandHandler("start",   cmd_start))
     tg_app.add_handler(CommandHandler("stop",    cmd_stop))
     tg_app.add_handler(CommandHandler("status",  cmd_status))
@@ -1332,7 +1371,8 @@ def main():
     tg_app.add_handler(CommandHandler("help",      cmd_help))
     tg_app.add_handler(CallbackQueryHandler(handle_callback))
 
-    logger.info("Telegram bot ready — send /start to begin")
+    logger.info("Telegram bot ready — trading loop auto-starts on boot "
+                "(BOT_AUTO_START=false to require manual /start)")
     tg_app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
