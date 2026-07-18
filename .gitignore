@@ -21,3 +21,4 @@ DSC_*.JPG
 *.code-workspace
 backtest_*.csv
 bot.log*
+SECURITY_ROTATION.md
