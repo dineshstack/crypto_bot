@@ -68,8 +68,28 @@ def _place_exit_orders(exchange: ccxt.binance, symbol: str, action: str,
     return result
 
 
+def _sized_amount(action: str, decision: dict, recommended_usd: float,
+                  size_scale: float = 1.0) -> tuple[float, bool]:
+    """
+    Final executed size from the risk-managed recommendation.
+
+    - size_scale: circuit-breaker multiplier (0.5 in drawdowns). Previously
+      main.py only scaled the advisory decision["trade_usd"], which execute()
+      ignores — so drawdown halving never affected real orders.
+    - Validated ML gate buys earn GATE_TRADE_MULT up to MAX_GATE_TRADE_USD
+      (alpha-sleeve tier; evidence basis in ROADMAP.md Phase 0 exit).
+    Returns (amount_usd, gate_trade).
+    """
+    amount = recommended_usd * size_scale
+    gate = False
+    if action == "buy" and decision.get("ml_buy_signal"):
+        amount = min(amount * config.GATE_TRADE_MULT, config.MAX_GATE_TRADE_USD)
+        gate = True
+    return max(config.MIN_TRADE_USD, round(amount, 2)), gate
+
+
 def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
-            portfolio: dict) -> dict:
+            portfolio: dict, size_scale: float = 1.0) -> dict:
     action = decision["action"]
     confidence = decision.get("confidence", 0.5)
     price = snapshot["price"]
@@ -81,8 +101,13 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
     # Risk manager determines optimal position size and stop levels
     risk = risk_manager.assess_trade(action, confidence, snapshot, portfolio)
 
-    # Use risk-managed size instead of Claude's raw suggestion
-    amount = risk.recommended_usd
+    # Risk-managed size, then circuit-breaker scale + alpha-sleeve gate tier
+    amount, gate_trade = _sized_amount(action, decision, risk.recommended_usd, size_scale)
+    if gate_trade:
+        logger.info(
+            "Alpha-sleeve: validated ML gate — size $%.2f (base $%.2f x%.1f, cap $%.0f)",
+            amount, risk.recommended_usd, config.GATE_TRADE_MULT, config.MAX_GATE_TRADE_USD,
+        )
 
     result = {
         "action": action,

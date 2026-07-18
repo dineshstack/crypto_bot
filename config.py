@@ -66,6 +66,13 @@ MAX_BTC_ALLOC_PCT  = 0.60   # Stop buying if BTC > 60% of portfolio
 MAX_TOTAL_CRYPTO_PCT = 0.80 # Max total crypto allocation (BTC+ETH) = 80%
 STOP_LOSS_PCT      = 0.09   # Pause bot if total portfolio drops 9%
 
+# Alpha-sleeve sizing: a validated ML gate (91.9% OOS win rate across 8
+# disjoint windows — see ROADMAP.md Phase 0 exit) earns a larger clip than
+# agent-led trades. Quarter-Kelly at the measured edge supports far more
+# than 3x; the ramp stays conservative until the 300-trade bar (G3).
+GATE_TRADE_MULT    = 3.0   # multiplier on risk-managed size when a gate fires
+MAX_GATE_TRADE_USD = 45.0  # absolute ceiling for gate trades
+
 # Circuit breaker thresholds (Phase-1 risk improvements)
 DAILY_LOSS_HALT_PCT   = 0.03  # Pause for the day if portfolio drops 3% intraday
 WEEKLY_LOSS_HALT_PCT  = 0.06  # Halt if portfolio drops 6% from the ISO week's start

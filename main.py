@@ -598,6 +598,19 @@ async def run_cycle():
                 _sizing_scale * 100, original_usd, decision["trade_usd"],
             )
 
+        # Block buy if total crypto (BTC+ETH combined) is at the cap — the
+        # executor's per-symbol cap cannot see the other asset's allocation
+        if decision["action"] == "buy":
+            combined = multi_asset.get_full_portfolio(exchange)
+            if combined["crypto_alloc_pct"] >= config.MAX_TOTAL_CRYPTO_PCT * 100:
+                decision["action"] = "hold"
+                decision["reason"] = (
+                    f"Total crypto at {combined['crypto_alloc_pct']:.0f}% "
+                    f"(max {config.MAX_TOTAL_CRYPTO_PCT:.0%}) — was: {decision['reason']}"
+                )
+                logger.info("Total-crypto cap: BTC buy blocked at %.1f%%",
+                            combined["crypto_alloc_pct"])
+
         # In LIVE mode, get human approval before any buy/sell
         if not config.TESTNET and decision["action"] in ("buy", "sell"):
             confirmed = await request_confirmation(decision, snap, port)
@@ -610,8 +623,10 @@ async def run_cycle():
                 )
                 return
 
-        # Execute (executor has its own code-level safety checks)
-        result = executor.execute(exchange, decision, snap, port)
+        # Execute (executor has its own code-level safety checks; the
+        # circuit-breaker sizing scale must reach the EXECUTED amount)
+        result = executor.execute(exchange, decision, snap, port,
+                                  size_scale=_sizing_scale)
         if result.get("risk_data"):
             decision["risk_data"] = result["risk_data"]
         db.log_trade(result, decision, snap)
@@ -760,8 +775,9 @@ async def run_eth_cycle():
                 logger.info("ETH trade rejected/expired by user — skipping.")
                 return
 
-        # Execute using the ETH symbol
-        result = executor.execute(exchange, decision, snap, eth_port)
+        # Execute using the ETH symbol (circuit-breaker scale applies here too)
+        result = executor.execute(exchange, decision, snap, eth_port,
+                                  size_scale=_sizing_scale)
         db.log_trade(result, decision, snap)
         db.log_event(
             "trade_eth",
