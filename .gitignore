@@ -12,3 +12,12 @@ bot.log
 *.log
 ANALYSIS_REPORT_June2026.md
 IMPLEMENTATION_PLAN.md
+.DS_Store
+dashboard/
+*.pdf
+*CV*
+*Cover_Letter*
+DSC_*.JPG
+*.code-workspace
+backtest_*.csv
+bot.log*
