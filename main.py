@@ -52,6 +52,7 @@ import market_data as md
 import claude_analyzer
 import executor
 import database as db
+import attribution
 import self_correction
 import weekly_review
 import coin_researcher
@@ -494,6 +495,7 @@ async def run_cycle():
 
         # Evaluate outcomes of unevaluated decisions incl. holds (self-correction + RL)
         lessons = self_correction.evaluate_and_learn(current_price=snap["price"])
+        attribution.persist_scoreboard()  # refresh Phase-2 scoreboard for API/dashboard
         for lesson in lessons:
             db.log_event("lesson", lesson, data={"source": "self_correction"})
         if lessons:
@@ -905,6 +907,10 @@ async def _loop():
                 )
             except Exception:
                 logger.exception("Weekly review error")
+            try:
+                await notify(_esc(attribution.report_text()))
+            except Exception:
+                logger.exception("Attribution report error")
 
         # ML model training/retraining (weekly, runs locally on VPS)
         if ml_signal.should_retrain():
