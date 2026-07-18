@@ -148,6 +148,22 @@ def get_last_unevaluated_trade() -> dict | None:
     )
 
 
+def get_unevaluated_trades(limit: int = 10) -> list[dict]:
+    """
+    Oldest-first unevaluated decisions — INCLUDING holds — that are at least
+    4h old (the outcome window). Holds were designed to be evaluated
+    (missed_opportunity) but were filtered out here for the bot's first
+    month, which is why the lessons table stayed empty.
+    """
+    return _execute(
+        """SELECT * FROM trades
+           WHERE outcome IS NULL AND success = 1
+             AND created_at <= NOW() - INTERVAL 4 HOUR
+           ORDER BY created_at ASC LIMIT %s""",
+        (limit,), fetch="all",
+    )
+
+
 def update_trade_outcome(trade_id: str, outcome: str, price_after: float):
     _execute(
         """UPDATE trades SET outcome = %s, price_after_4h = %s,

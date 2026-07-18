@@ -438,12 +438,14 @@ async def run_cycle():
                 _last_ml_prediction, _last_ml_price, snap["price"]
             )
 
-        # Evaluate outcome of the previous actionable trade (self-correction + RL)
-        lesson = self_correction.evaluate_and_learn(current_price=snap["price"])
-        if lesson:
+        # Evaluate outcomes of unevaluated decisions incl. holds (self-correction + RL)
+        lessons = self_correction.evaluate_and_learn(current_price=snap["price"])
+        for lesson in lessons:
             db.log_event("lesson", lesson, data={"source": "self_correction"})
+        if lessons:
+            joined = "\n".join(f"_{_esc(lesson)}_" for lesson in lessons[:3])
             await notify(
-                f"🧠 *Lesson learned from last trade:*\n_{_esc(lesson)}_"
+                f"🧠 *Lesson(s) learned from recent decisions:*\n{joined}"
             )
             # Feed RL agent with trade outcome reward
             try:

@@ -648,6 +648,17 @@ def train_model(exchange, cutoff_months: int = 0, regime_method: str = "auto",
     # ── 5. Boruta-SHAP feature selection ──
     selected_features = feature_cols
     try:
+        # scipy >= 1.12 removed binom_test; BorutaShap still imports it.
+        # Shim it onto the maintained binomtest so selection keeps working.
+        import scipy.stats
+        if not hasattr(scipy.stats, "binom_test"):
+            from scipy.stats import binomtest
+
+            def _binom_test_shim(x, n=None, p=0.5, alternative="two-sided"):
+                return binomtest(int(x), n=int(n), p=p, alternative=alternative).pvalue
+
+            scipy.stats.binom_test = _binom_test_shim
+
         from BorutaShap import BorutaShap
         logger.info("ML v2: Running Boruta-SHAP feature selection...")
         selector = BorutaShap(

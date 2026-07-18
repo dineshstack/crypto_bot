@@ -15,6 +15,7 @@ Outcome thresholds (applied 4 h after the trade, i.e. the next cycle):
 """
 from __future__ import annotations
 
+import json
 import logging
 import anthropic
 import config
@@ -23,6 +24,27 @@ import database as db
 logger = logging.getLogger(__name__)
 
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+
+_data_ex = None  # public production Binance — evaluation prices, never sandbox
+
+
+def _market_price(symbol: str, at_ts_ms: int | None = None) -> float:
+    """
+    Price of `symbol` at a moment in time (1h candle close), or last price
+    when at_ts_ms is None/now-ish. Evaluating a weeks-old backlog decision
+    against TODAY's price would be meaningless — outcomes are defined 4h
+    after the decision, so we fetch the candle at that hour.
+    """
+    global _data_ex
+    if _data_ex is None:
+        import ccxt
+        _data_ex = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "spot"}})
+    if at_ts_ms is not None:
+        hour_ms = at_ts_ms - (at_ts_ms % 3_600_000)
+        candles = _data_ex.fetch_ohlcv(symbol, "1h", since=hour_ms, limit=1)
+        if candles:
+            return float(candles[0][4])
+    return float(_data_ex.fetch_ticker(symbol)["last"])
 
 WRONG_THRESHOLD_PCT  = 2.0
 MISSED_THRESHOLD_PCT = 3.0
@@ -41,18 +63,25 @@ def _outcome(action: str, trade_price: float, now_price: float) -> tuple[str, fl
     return "neutral", pct
 
 
-def _generate_lesson(trade: dict, pct: float) -> str:
+def _generate_lesson(trade: dict, pct: float, result: str, symbol: str) -> str:
     m = trade.get("market") or {}
     d = trade.get("decision") or {}
+    if result == "missed_opportunity":
+        headline = (
+            f"You chose to HOLD, but {symbol} moved {pct:+.1f}% over the next 4 h — "
+            f"a missed opportunity."
+        )
+    else:
+        headline = f"You made a wrong {trade['action']} trade."
     prompt = (
-        f"You made a wrong {trade['action']} trade. Write ONE lesson (max 20 words) "
+        f"{headline} Write ONE lesson (max 20 words) "
         f"starting with 'Avoid', 'Do not', or 'Only'.\n\n"
-        f"Decision: {trade['action'].upper()} ${trade.get('amount_usd',0):.0f} "
-        f"at BTC ${trade['price']:,}\n"
+        f"Decision: {trade['action'].upper()} ${float(trade.get('amount_usd') or 0):.0f} "
+        f"at {symbol} ${float(trade['price']):,}\n"
         f"RSI {m.get('rsi','?')} | F&G {m.get('fear_greed','?')}/100 | "
         f"vs SMA20 {m.get('vs_sma20_pct','?')}%\n"
         f"Your reasoning: \"{d.get('reason','')}\"\n"
-        f"Price moved {pct:+.1f}% over the next 4 h — WRONG direction.\n\n"
+        f"Price moved {pct:+.1f}% over the next 4 h.\n\n"
         f"Lesson:"
     )
     r = _client.messages.create(
@@ -63,27 +92,47 @@ def _generate_lesson(trade: dict, pct: float) -> str:
     return r.content[0].text.strip().strip('"').strip("'")
 
 
-def evaluate_and_learn(current_price: float) -> str | None:
+def evaluate_and_learn(current_price: float | None = None,
+                       max_trades: int = 10) -> list[str]:
     """
-    Evaluate the most recent unevaluated trade against the current price.
-    Returns a new lesson string if the trade was 'wrong', else None.
+    Evaluate up to max_trades unevaluated decisions (buys, sells AND holds)
+    that are past the 4h outcome window. Symbol-aware: each decision is
+    scored against its own symbol's price 4h after the decision, so ETH
+    holds are never compared to the BTC price and week-old backlog rows are
+    scored at their historical window, not today.
+    Returns the list of newly generated lessons (wrong trades and missed
+    opportunities both teach).
     """
-    trade = db.get_last_unevaluated_trade()
-    if not trade:
-        return None
+    trades = db.get_unevaluated_trades(limit=max_trades)
+    lessons: list[str] = []
 
-    result, pct = _outcome(trade["action"], float(trade["price"]), current_price)
-    db.update_trade_outcome(trade["id"], result, current_price)
+    for trade in trades:
+        market = trade.get("market") or {}
+        if isinstance(market, str):
+            market = json.loads(market or "{}")
+        symbol = market.get("symbol") or "BTC/USDT"
 
-    logger.info(
-        "Trade %s (%s) outcome: %s (%.1f%%)",
-        trade["id"][:8], trade["action"], result, pct,
-    )
+        try:
+            eval_ts_ms = int(trade["created_at"].timestamp() * 1000) + 4 * 3_600_000
+            now_price = _market_price(symbol, at_ts_ms=eval_ts_ms)
+        except Exception as exc:
+            logger.warning("Outcome eval: no price for %s (trade #%s): %s",
+                           symbol, trade["id"], exc)
+            continue
 
-    if result == "wrong":
-        lesson = _generate_lesson(trade, pct)
-        db.save_lesson(lesson, "self_correction", trade["id"])
-        logger.info("New lesson: %s", lesson)
-        return lesson
+        result, pct = _outcome(trade["action"], float(trade["price"]), now_price)
+        db.update_trade_outcome(trade["id"], result, now_price)
+        logger.info("Trade #%s (%s %s) outcome: %s (%+.1f%%)",
+                    trade["id"], symbol, trade["action"], result, pct)
 
-    return None
+        if result in ("wrong", "missed_opportunity"):
+            try:
+                lesson = _generate_lesson(trade, pct, result, symbol)
+                db.save_lesson(lesson, "self_correction", trade["id"])
+                logger.info("New lesson: %s", lesson)
+                lessons.append(lesson)
+            except Exception as exc:
+                logger.warning("Lesson generation failed (trade #%s): %s",
+                               trade["id"], exc)
+
+    return lessons
