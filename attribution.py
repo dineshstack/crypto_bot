@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 DECISIVE_PCT = 2.0    # matches self_correction WRONG_THRESHOLD_PCT
 SCORE_TARGET = 200    # PRINCIPLES §6 review bar
 REGIME_7D_PCT = 3.0   # |7d change| beyond this = trending regime
+MAX_SANE_MOVE_PCT = 15.0  # a 4h move beyond this is a corrupt evaluation
+                          # (e.g. pre-fix ETH rows scored against BTC price)
 
 _BULL_WORDS = ("bullish", "bull", "positive", "risk-on", "accumulat")
 _BEAR_WORDS = ("bearish", "bear", "negative", "risk-off", "capitulat", "headwind")
@@ -97,6 +99,7 @@ def scoreboard(limit: int = 2000) -> dict:
     sources: dict[str, dict] = {}
     calib: dict[int, dict] = {}   # ml_probability decile -> {n, prob_sum, up}
     n_scored = 0
+    n_excluded = 0
     first_at = last_at = None
 
     for r in rows:
@@ -109,6 +112,10 @@ def scoreboard(limit: int = 2000) -> dict:
                 market = json.loads(market)
             move = (float(r["price_after_4h"]) - float(r["price"])) / float(r["price"]) * 100
         except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+
+        if abs(move) > MAX_SANE_MOVE_PCT:
+            n_excluded += 1
             continue
 
         n_scored += 1
@@ -179,6 +186,7 @@ def scoreboard(limit: int = 2000) -> dict:
 
     return {
         "n_scored": n_scored,
+        "n_excluded_corrupt": n_excluded,
         "score_target": SCORE_TARGET,
         "decisive_threshold_pct": DECISIVE_PCT,
         "window": {"from": first_at, "to": last_at},

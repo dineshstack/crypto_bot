@@ -114,6 +114,13 @@ class ScoreboardMath(unittest.TestCase):
         self.assertEqual(mid["n"], 2)
         self.assertEqual(mid["up_rate_4h"], 0.0)
 
+    def test_corrupt_cross_symbol_rows_excluded(self):
+        # An ETH row "evaluated" at BTC price → absurd move → excluded
+        self.rows.append(_row(4, 1746.11, 62759.28, {"action": "buy"}))
+        board = attribution.scoreboard()
+        self.assertEqual(board["n_scored"], 3)
+        self.assertEqual(board["n_excluded_corrupt"], 1)
+
     def test_report_text_renders(self):
         text = attribution.report_text()
         self.assertIn("Attribution scoreboard", text)
