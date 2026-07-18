@@ -600,6 +600,10 @@ async def run_cycle():
                 _sizing_scale * 100, original_usd, decision["trade_usd"],
             )
 
+        # Mirror-ready alert the moment a validated gate fires (independent of
+        # whether caps/approval let the bot itself act on it)
+        await _maybe_gate_alert(decision, snap)
+
         # Block buy if total crypto (BTC+ETH combined) is at the cap — the
         # executor's per-symbol cap cannot see the other asset's allocation
         if decision["action"] == "buy":
@@ -759,6 +763,9 @@ async def run_eth_cycle():
                 "ETH sizing scale %.0f%% applied: $%.2f → $%.2f",
                 _sizing_scale * 100, original_usd, decision["trade_usd"],
             )
+
+        # Mirror-ready alert the moment a validated gate fires
+        await _maybe_gate_alert(decision, snap)
 
         # Block buy if ETH allocation already at max
         if decision["action"] == "buy" and eth_alloc >= eth_cfg["max_alloc_pct"]:
@@ -943,6 +950,62 @@ async def _loop():
 
 
 # ── Telegram helpers ────────────────────────────────────────────────────────
+
+def _gate_alert_text(decision: dict, snap: dict) -> str | None:
+    """
+    Mirror-ready gate alert: everything a human needs to place the same trade
+    on a personal account within minutes. Returns None when no gate fired.
+
+    Entry/target/stop use the identical ±PROFIT_TARGET_PCT barriers and
+    LOOKAHEAD_HOURS time exit that produced the OOS validation record —
+    the mirrored trade must be the trade that was validated, not a variant.
+    """
+    if decision.get("ml_buy_signal"):
+        side = "BUY"
+    elif decision.get("ml_sell_signal"):
+        side = "SELL"
+    else:
+        return None
+
+    price = float(snap["price"])
+    symbol = snap.get("symbol") or config.SYMBOL
+    prob = decision.get("ml_probability")
+    pt = ml_signal.PROFIT_TARGET_PCT / 100
+    sl = ml_signal.STOP_LOSS_PCT / 100
+    target = price * (1 + pt) if side == "BUY" else price * (1 - pt)
+    stop = price * (1 - sl) if side == "BUY" else price * (1 + sl)
+    prob_txt = f"p={prob:.3f} cleared the validated gate" if prob is not None else "validated gate fired"
+
+    return (
+        f"🎯 GATE SIGNAL — {symbol} {side}\n"
+        f"{prob_txt}\n\n"
+        f"To mirror on a personal account (act within ~15 min, 1h-bar signal):\n"
+        f"• Entry: market ≈ ${price:,.2f}\n"
+        f"• Target: ${target:,.2f} ({'+' if side == 'BUY' else '-'}{ml_signal.PROFIT_TARGET_PCT}%)\n"
+        f"• Stop: ${stop:,.2f} ({'-' if side == 'BUY' else '+'}{ml_signal.STOP_LOSS_PCT}%)\n"
+        f"• Time exit: close after {ml_signal.LOOKAHEAD_HOURS}h if neither hits\n"
+        f"• Suggested clip while verifying: $20–50\n\n"
+        f"Basis: 123 OOS trades, 113W/10L. This signal extends the forward record."
+    )
+
+
+async def _maybe_gate_alert(decision: dict, snap: dict):
+    """Send the mirror alert whenever a gate fires — even if the bot itself
+    ends up capped, halted, or rejected: a human mirroring manually still
+    wants the signal, and the event must enter the forward record."""
+    text = _gate_alert_text(decision, snap)
+    if not text:
+        return
+    symbol = snap.get("symbol") or config.SYMBOL
+    side = "BUY" if decision.get("ml_buy_signal") else "SELL"
+    db.log_event(
+        "gate_signal",
+        f"{symbol} {side} gate @ ${float(snap['price']):,.2f}",
+        data={"symbol": symbol, "side": side, "price": snap["price"],
+              "ml_probability": decision.get("ml_probability")},
+    )
+    await notify(_esc(text))
+
 
 def _esc(text: str) -> str:
     """Escape MarkdownV2 special characters."""
