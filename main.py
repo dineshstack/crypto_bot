@@ -31,6 +31,7 @@ Telegram commands (coin research):
 """
 import asyncio
 import datetime
+import json
 import logging
 import sys
 import uuid as uuid_mod
@@ -247,6 +248,20 @@ async def _check_circuit_breakers(total: float) -> bool:
                              f"Equity below MA: ${total:.2f} < ${equity_ma:.2f}", "info")
     except Exception:
         pass  # non-fatal — snapshots may not exist yet
+
+    # Persist a risk snapshot so the dashboard can show live safety state
+    try:
+        db.set_state("risk_status", json.dumps({
+            "total_usd":        round(total, 2),
+            "session_peak_usd": round(_session_peak_usd or 0, 2),
+            "daily_start_usd":  round(_daily_start_usd or 0, 2),
+            "weekly_start_usd": round(_weekly_start_usd or 0, 2),
+            "sizing_scale":     _sizing_scale,
+            "drawdown_pct":     round(drawdown * 100, 2),
+            "checked_at":       datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }))
+    except Exception:
+        pass
 
     return True
 

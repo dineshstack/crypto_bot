@@ -485,6 +485,20 @@ def analyze(snapshot: dict, portfolio: dict, exchange=None) -> dict:
     if exchange:
         ml_data = ml_signal.predict(exchange)
         ml_ctx = ml_signal.get_ml_context(exchange)
+        # Persist the live ML state so the dashboard can show gates vs probs
+        try:
+            db.set_state("ml_status", json.dumps({
+                "probability_up":   ml_data.get("ml_probability_up"),
+                "probability_sell": ml_data.get("ml_probability_sell"),
+                "buy_threshold":    ml_data.get("ml_buy_threshold"),
+                "sell_threshold":   ml_data.get("ml_sell_threshold"),
+                "buy_signal":       bool(ml_data.get("ml_buy_signal")),
+                "sell_signal":      bool(ml_data.get("ml_sell_signal")),
+                "regime":           ml_data.get("ml_regime"),
+                "model_accuracy":   ml_data.get("ml_model_accuracy"),
+            }))
+        except Exception:
+            pass
 
     # Run Agent 1 (Market) and Agent 2 (Sentiment) in PARALLEL
     with ThreadPoolExecutor(max_workers=2) as pool:
