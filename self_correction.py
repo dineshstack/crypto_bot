@@ -64,8 +64,13 @@ def _outcome(action: str, trade_price: float, now_price: float) -> tuple[str, fl
 
 
 def _generate_lesson(trade: dict, pct: float, result: str, symbol: str) -> str:
+    # MySQL JSON columns arrive as strings — parse before .get()
     m = trade.get("market") or {}
+    if isinstance(m, str):
+        m = json.loads(m or "{}")
     d = trade.get("decision") or {}
+    if isinstance(d, str):
+        d = json.loads(d or "{}")
     if result == "missed_opportunity":
         headline = (
             f"You chose to HOLD, but {symbol} moved {pct:+.1f}% over the next 4 h — "
