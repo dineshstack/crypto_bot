@@ -91,6 +91,17 @@ _session_peak_usd: float | None = None   # highest portfolio value since /start
 _daily_start_usd:  float | None = None   # portfolio at start of current calendar day
 _daily_date:       str          = ""     # ISO date when _daily_start_usd was recorded
 _sizing_scale:     float        = 1.0    # position-size multiplier (halved at 10% drawdown)
+_weekly_start_usd: float | None = None   # portfolio at start of current ISO week
+_weekly_key:       str          = ""     # ISO year-week when _weekly_start_usd was recorded
+_cycle_failures:   int          = 0      # consecutive failed analysis cycles
+
+
+def _persist_halt(reason: str):
+    """Record a durable halt so auto-start cannot resurrect trading past it."""
+    try:
+        db.set_state("halted", reason)
+    except Exception as exc:
+        logger.error("Failed to persist halt state: %s", exc)
 
 
 # ── Circuit-breaker helpers ────────────────────────────────────────────────
@@ -120,6 +131,7 @@ async def _check_circuit_breakers(total: float) -> bool:
              _daily_start_usd, _daily_date
     """
     global bot_active, _session_peak_usd, _daily_start_usd, _daily_date, _sizing_scale
+    global _weekly_start_usd, _weekly_key
 
     today = datetime.date.today().isoformat()
 
@@ -128,6 +140,14 @@ async def _check_circuit_breakers(total: float) -> bool:
         _daily_start_usd = total
         _daily_date = today
         logger.info("Circuit breakers: new day — daily baseline $%.2f", total)
+
+    # Reset weekly baseline at the start of each ISO week
+    iso = datetime.date.today().isocalendar()
+    week_key = f"{iso[0]}-W{iso[1]:02d}"
+    if _weekly_key != week_key:
+        _weekly_start_usd = total
+        _weekly_key = week_key
+        logger.info("Circuit breakers: new week %s — weekly baseline $%.2f", week_key, total)
 
     # Track session peak for drawdown calculation
     if _session_peak_usd is None or total > _session_peak_usd:
@@ -140,11 +160,28 @@ async def _check_circuit_breakers(total: float) -> bool:
         db.log_event("circuit_breaker", f"Daily loss {daily_loss_pct:.1f}%", "warning",
                      {"daily_start": _daily_start_usd, "current": total})
         bot_active = False
+        _persist_halt(f"daily loss gate: -{daily_loss_pct:.1f}% intraday")
         await notify(
             f"⚠️ *Daily loss gate triggered*\n"
             f"Down {daily_loss_pct:.1f}% today "
             f"\\(${_daily_start_usd:.2f} → ${total:.2f}\\)\\.\n"
             f"Trading paused for the rest of today\\. Use /start tomorrow\\."
+        )
+        return False
+
+    # 1b. Weekly loss gate — 6% drop from the week's start halts until review
+    if _weekly_start_usd and total < _weekly_start_usd * (1 - config.WEEKLY_LOSS_HALT_PCT):
+        weekly_loss_pct = (_weekly_start_usd - total) / _weekly_start_usd * 100
+        logger.warning("Circuit breaker: weekly loss %.1f%% — halting bot", weekly_loss_pct)
+        db.log_event("circuit_breaker", f"Weekly loss {weekly_loss_pct:.1f}%", "warning",
+                     {"weekly_start": _weekly_start_usd, "current": total})
+        bot_active = False
+        _persist_halt(f"weekly loss gate: -{weekly_loss_pct:.1f}% this week")
+        await notify(
+            f"⛔ *Weekly loss gate triggered*\n"
+            f"Down {weekly_loss_pct:.1f}% this week "
+            f"\\(${_weekly_start_usd:.2f} → ${total:.2f}\\)\\.\n"
+            f"Bot halted — review the strategy before /start\\."
         )
         return False
 
@@ -154,6 +191,7 @@ async def _check_circuit_breakers(total: float) -> bool:
         logger.warning("Circuit breaker: %d consecutive losses — pausing bot", consec)
         db.log_event("circuit_breaker", f"Consecutive losses: {consec}", "warning")
         bot_active = False
+        _persist_halt(f"consecutive loss gate: {consec} losses in a row")
         await notify(
             f"⚠️ *Consecutive loss gate triggered*\n"
             f"{consec} losses in a row\\.\n"
@@ -169,6 +207,7 @@ async def _check_circuit_breakers(total: float) -> bool:
         db.log_event("circuit_breaker", f"Critical drawdown {drawdown:.1%}", "warning",
                      {"peak": _session_peak_usd, "current": total})
         bot_active = False
+        _persist_halt(f"critical drawdown halt: {drawdown:.1%} from session peak")
         await notify(
             f"⛔ *Critical drawdown halt*\n"
             f"{drawdown:.1%} drawdown from session peak "
@@ -780,7 +819,7 @@ async def _send_daily_briefing():
 
 async def _loop():
     """Periodic loop: run cycle → sleep → check weekly review → repeat."""
-    global bot_active, _emergency_event
+    global bot_active, _emergency_event, _cycle_failures
     _emergency_event = asyncio.Event()
 
     _last_briefing_date = ""
@@ -797,8 +836,33 @@ async def _loop():
             except Exception:
                 logger.debug("Daily briefing failed")
 
-        await run_cycle()         # BTC analysis
-        await run_eth_cycle()     # ETH analysis
+        # Exchange-error circuit breaker: a cycle that raises must not kill
+        # the loop silently (the process would look healthy while trading is
+        # dead), and repeated failures mean the exchange/API is unhealthy —
+        # halt durably rather than retry forever.
+        try:
+            await run_cycle()         # BTC analysis
+            await run_eth_cycle()     # ETH analysis
+            _cycle_failures = 0
+        except Exception as exc:
+            _cycle_failures += 1
+            logger.error("Analysis cycle failed (%d/%d): %s",
+                         _cycle_failures, config.CYCLE_FAILURE_HALT, exc, exc_info=True)
+            db.log_event("cycle_error", str(exc)[:200], "error",
+                         {"consecutive": _cycle_failures})
+            if _cycle_failures >= config.CYCLE_FAILURE_HALT:
+                bot_active = False
+                _persist_halt(
+                    f"cycle failure gate: {_cycle_failures} consecutive failures "
+                    f"({str(exc)[:80]})"
+                )
+                await notify(
+                    f"⛔ *Cycle failure halt*\n"
+                    f"{_cycle_failures} consecutive analysis cycles failed\\.\n"
+                    f"Last error: {_esc(str(exc)[:100])}\n"
+                    f"Bot halted — investigate, then /start to resume\\."
+                )
+                break
 
         # Weekly deep-review check (Opus — runs ~once per week)
         if weekly_review.should_run():
@@ -933,6 +997,26 @@ async def _post_init(app: Application):
         return
     if bot_active:
         return
+
+    # A durable halt (circuit breaker or manual /stop) outranks auto-start —
+    # a systemd restart must never resurrect trading past a risk halt.
+    halt_reason = None
+    try:
+        halt_reason = db.get_state("halted")
+    except Exception as exc:
+        logger.warning("Could not read halt state: %s", exc)
+    if halt_reason:
+        logger.warning("Auto-start SUPPRESSED — durable halt active: %s", halt_reason)
+        try:
+            await app.bot.send_message(
+                chat_id=config.TELEGRAM_CHAT_ID,
+                text=(f"♻️ Bot process restarted, but trading stays HALTED:\n"
+                      f"{halt_reason}\n\nSend /start to clear the halt and resume."),
+            )
+        except Exception:
+            pass
+        return
+
     text = await _start_trading()
     logger.info("Auto-started trading loop on process boot")
     try:
@@ -945,11 +1029,21 @@ async def _post_init(app: Application):
 
 
 async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
+    global _cycle_failures
     if not _auth(update):
         return
     if bot_active:
         await update.message.reply_text("Bot is already running.")
         return
+
+    # /start is the explicit human override that clears any durable halt
+    try:
+        if db.get_state("halted"):
+            db.clear_state("halted")
+            logger.info("Durable halt cleared by /start")
+    except Exception as exc:
+        logger.warning("Could not clear halt state: %s", exc)
+    _cycle_failures = 0
 
     text = await _start_trading()
     await update.message.reply_text(text)
@@ -960,6 +1054,7 @@ async def cmd_stop(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     if not _auth(update):
         return
     bot_active = False
+    _persist_halt("manual stop via /stop")  # survives systemd restarts
     if analysis_loop:
         analysis_loop.cancel()
     await ws_stream.stop()

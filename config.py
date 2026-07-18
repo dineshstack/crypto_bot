@@ -68,9 +68,11 @@ STOP_LOSS_PCT      = 0.09   # Pause bot if total portfolio drops 9%
 
 # Circuit breaker thresholds (Phase-1 risk improvements)
 DAILY_LOSS_HALT_PCT   = 0.03  # Pause for the day if portfolio drops 3% intraday
+WEEKLY_LOSS_HALT_PCT  = 0.06  # Halt if portfolio drops 6% from the ISO week's start
 DRAWDOWN_REDUCE_PCT   = 0.10  # Halve position sizing at 10% drawdown from session peak
 DRAWDOWN_HALT_PCT     = 0.20  # Full halt at 20% drawdown from session peak
 CONSECUTIVE_LOSS_HALT = 5     # Pause after 5 consecutive losing trades
+CYCLE_FAILURE_HALT    = 3     # Halt after 3 consecutive failed analysis cycles
 
 # Bot behaviour
 ANALYSIS_INTERVAL_HOURS = 4   # Run Claude analysis every 4 hours

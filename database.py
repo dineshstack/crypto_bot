@@ -90,6 +90,18 @@ def _migrate_lessons():
                 logger.warning("DB migration failed for lessons.%s: %s", col, exc)
 
 
+def _ensure_state_table():
+    """Durable key-value state (halt flags etc.) that must survive restarts."""
+    _execute(
+        """CREATE TABLE IF NOT EXISTS bot_state (
+               k          VARCHAR(50) PRIMARY KEY,
+               v          TEXT        NOT NULL,
+               updated_at TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+                          ON UPDATE CURRENT_TIMESTAMP
+           ) ENGINE=InnoDB"""
+    )
+
+
 def init():
     """Verify MySQL connection and run idempotent migrations."""
     try:
@@ -97,9 +109,29 @@ def init():
         logger.info("MySQL connected OK (%s@%s/%s)",
                      config.MYSQL_USER, config.MYSQL_HOST, config.MYSQL_DATABASE)
         _migrate_lessons()
+        _ensure_state_table()
     except Exception as exc:
         logger.error("MySQL connection failed: %s", exc)
         raise
+
+
+# ── Durable state (halt flags — must survive process restarts) ───────────────
+
+def set_state(key: str, value: str):
+    _execute(
+        "INSERT INTO bot_state (k, v) VALUES (%s, %s) "
+        "ON DUPLICATE KEY UPDATE v = VALUES(v)",
+        (key, str(value)),
+    )
+
+
+def get_state(key: str) -> str | None:
+    row = _execute("SELECT v FROM bot_state WHERE k = %s", (key,), fetch="one")
+    return row["v"] if row else None
+
+
+def clear_state(key: str):
+    _execute("DELETE FROM bot_state WHERE k = %s", (key,))
 
 
 # ── Trades ───────────────────────────────────────────────────────────────────
