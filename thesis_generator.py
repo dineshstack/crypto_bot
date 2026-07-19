@@ -189,17 +189,25 @@ Write a structured investment thesis with these exact sections:
 Write in professional language suitable for client communication. Be specific with numbers."""
 
     try:
-        resp = _client.messages.create(
-            model=config.CLAUDE_OPUS_MODEL,
+        resp = _client.beta.messages.create(
+            model=config.CLAUDE_DEEP_MODEL,
             max_tokens=3000,
+            betas=["server-side-fallback-2026-06-01"],
+            fallbacks=[{"model": config.CLAUDE_DEEP_FALLBACK}],
             messages=[{"role": "user", "content": prompt}],
         )
-        thesis_text = resp.content[0].text.strip()
+        if resp.stop_reason == "refusal":
+            raise RuntimeError("thesis request declined by safety filters")
+        # Fable always emits thinking blocks first — take the first text block
+        thesis_text = next(
+            (b.text for b in resp.content if getattr(b, "type", None) == "text"),
+            "",
+        ).strip()
 
         db.log_claude_call(
             cycle_id=f"thesis_{coin['symbol']}_{date.today().isoformat()}",
             agent="thesis_generator",
-            model=config.CLAUDE_OPUS_MODEL,
+            model=resp.model,
             prompt=prompt[:5000],
             response=thesis_text[:5000],
             tokens_in=resp.usage.input_tokens if resp.usage else 0,

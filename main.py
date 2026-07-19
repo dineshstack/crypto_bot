@@ -10,8 +10,8 @@ Features:
   - Self-correction: evaluates past trades, generates lessons for future cycles
   - Historical context: last 5 decisions injected into Claude's prompt
   - Live-trade confirmation: LIVE mode requires Telegram ✅/❌ approval first
-  - Weekly deep review: Claude Opus generates lessons from 7-day performance
-  - NEW COIN RESEARCH: Claude Opus scores newly listed coins 0-100 for investment
+  - Weekly deep review: Claude Fable generates lessons from 7-day performance
+  - NEW COIN RESEARCH: Claude Fable scores newly listed coins 0-100 for investment
 
 Telegram commands (BTC trading):
   /start    — begin the trading loop
@@ -20,11 +20,11 @@ Telegram commands (BTC trading):
   /analyze  — trigger immediate analysis
   /history  — last 5 trades with outcomes
   /lessons  — lessons Claude has self-learned
-  /review   — trigger a weekly deep-review now (Opus)
+  /review   — trigger a weekly deep-review now (Fable)
 
 Telegram commands (coin research):
   /newcoins          — scan CoinGecko for new/trending coins, score top 3
-  /research <symbol> — deep-dive research on any specific coin (Opus)
+  /research <symbol> — deep-dive research on any specific coin (Fable)
   /watchlist         — view your saved investment watchlist
 
   /help     — full command list
@@ -904,9 +904,9 @@ async def _loop():
                 )
                 break
 
-        # Weekly deep-review check (Opus — runs ~once per week)
+        # Weekly deep-review check (Fable — runs ~once per week)
         if weekly_review.should_run():
-            await notify("📊 Running weekly deep review with Claude Opus…")
+            await notify("📊 Running weekly deep review with Claude Fable…")
             try:
                 summary = weekly_review.run()
                 await notify(
@@ -1245,7 +1245,7 @@ async def cmd_lessons(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_review(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
     if not _auth(update):
         return
-    await update.message.reply_text("📊 Running deep review with Claude Opus (may take ~30s)…")
+    await update.message.reply_text("📊 Running deep review with Claude Fable (may take a few minutes)…")
     try:
         summary = weekly_review.run()
         await update.message.reply_text(
@@ -1257,7 +1257,7 @@ async def cmd_review(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_newcoins(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
-    """Scan CoinGecko for newly listed + trending coins; score top 3 with Opus."""
+    """Scan CoinGecko for newly listed + trending coins; score top 3 with Fable."""
     if not _auth(update):
         return
     await update.message.reply_text(
@@ -1312,7 +1312,7 @@ async def cmd_research(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
 
     query = " ".join(args).strip()
     await update.message.reply_text(
-        f"🔬 Researching *{_esc(query)}* with Claude Opus \\(~30 seconds\\)\\.\\.\\.",
+        f"🔬 Researching *{_esc(query)}* with Claude Fable \\(may take a few minutes\\)\\.\\.\\.",
         parse_mode="MarkdownV2",
     )
 
@@ -1420,7 +1420,7 @@ async def cmd_screen(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_report(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
-    """Generate weekly market report with Claude Opus."""
+    """Generate weekly market report with Claude Fable."""
     if not _auth(update):
         return
     args = _ctx.args or []
@@ -1431,7 +1431,7 @@ async def cmd_report(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             pass
 
-    await update.message.reply_text(f"📊 Generating {days}-day market report with Claude Opus (may take ~60s)...")
+    await update.message.reply_text(f"📊 Generating {days}-day market report with Claude Fable (may take a few minutes)...")
     loop = asyncio.get_event_loop()
     try:
         report = await loop.run_in_executor(None, report_generator.generate_report, days, "weekly" if days <= 7 else "monthly")
@@ -1466,7 +1466,7 @@ async def cmd_thesis(update: Update, _ctx: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             pass
 
-    await update.message.reply_text(f"🔬 Generating investment thesis for *{query.upper()}* (portfolio: ${portfolio_size:,.0f})...\nThis uses Claude Opus and takes ~60s.", parse_mode="Markdown")
+    await update.message.reply_text(f"🔬 Generating investment thesis for *{query.upper()}* (portfolio: ${portfolio_size:,.0f})...\nThis uses Claude Fable and may take a few minutes.", parse_mode="Markdown")
     loop = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(None, thesis_generator.generate_thesis, query, portfolio_size)

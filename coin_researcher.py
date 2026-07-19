@@ -406,13 +406,17 @@ Whitepaper: {detail.get('whitepaper') or 'N/A'}
 Evaluate all dimensions and return the JSON investment report."""
 
     try:
-        response = _client.messages.create(
-            model=config.CLAUDE_OPUS_MODEL,
+        response = _client.beta.messages.create(
+            model=config.CLAUDE_DEEP_MODEL,
             max_tokens=1024,
             thinking={"type": "adaptive"},
+            betas=["server-side-fallback-2026-06-01"],
+            fallbacks=[{"model": config.CLAUDE_DEEP_FALLBACK}],
             system=_RESEARCH_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
+        if response.stop_reason == "refusal":
+            raise RuntimeError("research request declined by safety filters")
         raw = next(
             (b.text for b in response.content if getattr(b, "type", None) == "text"),
             "",

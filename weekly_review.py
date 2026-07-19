@@ -1,5 +1,5 @@
 """
-Weekly deep-review module using Claude Opus 4.8.
+Weekly deep-review module using Claude Fable 5 (falls back to Opus 4.8).
 
 Runs once per week (triggered from main.py's loop check).
 Looks at the last 7 days of trades, evaluates performance, and produces:
@@ -106,12 +106,18 @@ LESSON 1: <lesson sentence>
 LESSON 2: <lesson sentence>
 LESSON 3: <lesson sentence>"""
 
-    response = _client.messages.create(
-        model=config.CLAUDE_OPUS_MODEL,
+    response = _client.beta.messages.create(
+        model=config.CLAUDE_DEEP_MODEL,
         max_tokens=1024,
         thinking={"type": "adaptive"},
+        betas=["server-side-fallback-2026-06-01"],
+        fallbacks=[{"model": config.CLAUDE_DEEP_FALLBACK}],
         messages=[{"role": "user", "content": prompt}],
     )
+
+    if response.stop_reason == "refusal":
+        logger.warning("Weekly review declined by safety filters (whole fallback chain)")
+        return "Weekly review was declined by the model's safety filters — try /review again later."
 
     # Extract text block (thinking blocks are separate)
     review_text = next(

@@ -174,18 +174,26 @@ Write in professional but accessible language. Clients are not traders — expla
 Do not use markdown. Use plain text with section headers in CAPS."""
 
     try:
-        resp = _client.messages.create(
-            model=config.CLAUDE_OPUS_MODEL,
+        resp = _client.beta.messages.create(
+            model=config.CLAUDE_DEEP_MODEL,
             max_tokens=2000,
+            betas=["server-side-fallback-2026-06-01"],
+            fallbacks=[{"model": config.CLAUDE_DEEP_FALLBACK}],
             messages=[{"role": "user", "content": prompt}],
         )
-        report_text = resp.content[0].text.strip()
+        if resp.stop_reason == "refusal":
+            raise RuntimeError("report request declined by safety filters")
+        # Fable always emits thinking blocks first — take the first text block
+        report_text = next(
+            (b.text for b in resp.content if getattr(b, "type", None) == "text"),
+            "",
+        ).strip()
 
         # Log the Claude call
         db.log_claude_call(
             cycle_id=f"report_{date.today().isoformat()}",
             agent="report_generator",
-            model=config.CLAUDE_OPUS_MODEL,
+            model=resp.model,
             prompt=prompt[:5000],
             response=report_text[:5000],
             tokens_in=resp.usage.input_tokens if resp.usage else 0,

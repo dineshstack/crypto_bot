@@ -85,6 +85,7 @@ CYCLE_FAILURE_HALT    = 3     # Halt after 3 consecutive failed analysis cycles
 ANALYSIS_INTERVAL_HOURS = 4   # Run Claude analysis every 4 hours
 
 # Claude models
-CLAUDE_MODEL      = "claude-haiku-4-5"      # frequent analysis — cheap
-CLAUDE_OPUS_MODEL = "claude-opus-4-8"       # weekly deep review only
+CLAUDE_MODEL         = "claude-haiku-4-5"   # frequent analysis — cheap
+CLAUDE_DEEP_MODEL    = "claude-fable-5"     # deep reasoning: weekly review, thesis, reports, coin research
+CLAUDE_DEEP_FALLBACK = "claude-opus-4-8"    # auto-serves the request if Fable's safety classifiers decline
 CLAUDE_MAX_TOKENS = 512
