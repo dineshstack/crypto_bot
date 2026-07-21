@@ -34,6 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 import requests
 import anthropic
+import claude_deep
 import config
 
 logger = logging.getLogger(__name__)
@@ -406,12 +407,8 @@ Whitepaper: {detail.get('whitepaper') or 'N/A'}
 Evaluate all dimensions and return the JSON investment report."""
 
     try:
-        response = _client.beta.messages.create(
-            model=config.CLAUDE_DEEP_MODEL,
-            max_tokens=1024,
-            thinking={"type": "adaptive"},
-            betas=["server-side-fallback-2026-06-01"],
-            fallbacks=[{"model": config.CLAUDE_DEEP_FALLBACK}],
+        response = claude_deep.call_deep_model(
+            _client, max_tokens=1024, thinking=True,
             system=_RESEARCH_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )

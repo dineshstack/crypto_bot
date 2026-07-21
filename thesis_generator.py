@@ -21,6 +21,7 @@ from datetime import date
 import anthropic
 import requests
 
+import claude_deep
 import config
 import database as db
 
@@ -189,11 +190,8 @@ Write a structured investment thesis with these exact sections:
 Write in professional language suitable for client communication. Be specific with numbers."""
 
     try:
-        resp = _client.beta.messages.create(
-            model=config.CLAUDE_DEEP_MODEL,
-            max_tokens=3000,
-            betas=["server-side-fallback-2026-06-01"],
-            fallbacks=[{"model": config.CLAUDE_DEEP_FALLBACK}],
+        resp = claude_deep.call_deep_model(
+            _client, max_tokens=3000,
             messages=[{"role": "user", "content": prompt}],
         )
         if resp.stop_reason == "refusal":

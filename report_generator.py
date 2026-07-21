@@ -33,6 +33,7 @@ class _SafeEncoder(json.JSONEncoder):
 def _json(obj) -> str:
     return json.dumps(obj, cls=_SafeEncoder)
 
+import claude_deep
 import config
 import database as db
 import analytics
@@ -174,11 +175,8 @@ Write in professional but accessible language. Clients are not traders — expla
 Do not use markdown. Use plain text with section headers in CAPS."""
 
     try:
-        resp = _client.beta.messages.create(
-            model=config.CLAUDE_DEEP_MODEL,
-            max_tokens=2000,
-            betas=["server-side-fallback-2026-06-01"],
-            fallbacks=[{"model": config.CLAUDE_DEEP_FALLBACK}],
+        resp = claude_deep.call_deep_model(
+            _client, max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         )
         if resp.stop_reason == "refusal":

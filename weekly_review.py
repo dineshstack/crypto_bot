@@ -11,6 +11,7 @@ Uses adaptive thinking so Opus can reason deeply about patterns.
 import logging
 from datetime import datetime, timedelta, timezone
 import anthropic
+import claude_deep
 import config
 import database as db
 
@@ -106,12 +107,8 @@ LESSON 1: <lesson sentence>
 LESSON 2: <lesson sentence>
 LESSON 3: <lesson sentence>"""
 
-    response = _client.beta.messages.create(
-        model=config.CLAUDE_DEEP_MODEL,
-        max_tokens=1024,
-        thinking={"type": "adaptive"},
-        betas=["server-side-fallback-2026-06-01"],
-        fallbacks=[{"model": config.CLAUDE_DEEP_FALLBACK}],
+    response = claude_deep.call_deep_model(
+        _client, max_tokens=1024, thinking=True,
         messages=[{"role": "user", "content": prompt}],
     )
 
