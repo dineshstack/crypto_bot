@@ -156,6 +156,34 @@ async def _check_execution_health(result: dict, symbol: str):
         _exec_alerted = False  # clean streak — re-arm the alert
 
 
+async def _warn_if_unprotected(result: dict, symbol: str):
+    """
+    Alert when a filled buy/sell left its position WITHOUT a stop-loss resting
+    on the exchange. The executor tries to place a protective bracket but the
+    exchange can reject it (e.g. PERCENT_PRICE_BY_SIDE, MAX_NUM_ALGO_ORDERS);
+    that used to be swallowed as "non-fatal", silently leaving live positions
+    unprotected. Surface it instead.
+    """
+    if not (result.get("success") and result.get("submitted")):
+        return
+    if result.get("action") not in ("buy", "sell"):
+        return
+    if result.get("stop_protected"):
+        return
+    sym = symbol.split("/")[0]
+    logger.warning("%s %s filled but stop-loss NOT placed on exchange — position unprotected",
+                   sym, result.get("action"))
+    db.log_event("unprotected_position",
+                 f"{sym} {result.get('action')} filled without an exchange stop-loss",
+                 "warning", {"symbol": symbol})
+    await notify(
+        f"⚠️ *Position unprotected*\n"
+        f"{sym} {result.get('action', '').upper()} filled, but the stop\\-loss "
+        f"order was *rejected by the exchange*\\. The position has no resting "
+        f"stop right now — check open orders\\."
+    )
+
+
 # ── Circuit-breaker helpers ────────────────────────────────────────────────
 
 def _count_consecutive_losses() -> int:
@@ -701,6 +729,7 @@ async def run_cycle():
         if result.get("risk_data"):
             decision["risk_data"] = result["risk_data"]
         await _check_execution_health(result, snap.get("symbol", config.SYMBOL))
+        await _warn_if_unprotected(result, snap.get("symbol", config.SYMBOL))
         db.log_trade(result, decision, snap)
         db.log_event("trade", f"{decision['action'].upper()} ${decision['trade_usd']:.2f}",
                      data={"action": decision["action"], "amount": decision["trade_usd"],
@@ -855,7 +884,10 @@ async def run_eth_cycle():
         # Execute using the ETH symbol (circuit-breaker scale applies here too)
         result = executor.execute(exchange, decision, snap, eth_port,
                                   size_scale=_sizing_scale)
+        if result.get("risk_data"):
+            decision["risk_data"] = result["risk_data"]   # was missing — ETH trades stored no stop/target
         await _check_execution_health(result, eth_sym)
+        await _warn_if_unprotected(result, eth_sym)
         db.log_trade(result, decision, snap)
         db.log_event(
             "trade_eth",
