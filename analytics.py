@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 import database as db
+import trade_pnl
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,25 @@ def _get_snapshots(days: int | None = None) -> list[dict]:
         return []
 
 
+def _win_loss_pnls(actionable: list[dict]) -> tuple[list[float], list[float]]:
+    """
+    Split evaluated buy/sell trades into (winning $ P&Ls, losing $ magnitudes)
+    by NET decision P&L sign. Unevaluated trades (no horizon price yet) are
+    skipped. See trade_pnl.decision_pnl_pct for the per-trade measure.
+    """
+    win_pnls, loss_pnls = [], []
+    for t in actionable:
+        pnl_pct = trade_pnl.decision_pnl_pct(t["action"], t.get("price"), t.get("price_after_4h"))
+        if pnl_pct is None:
+            continue
+        pnl_usd = float(t.get("amount_usd") or 0) * pnl_pct / 100.0
+        if pnl_usd > 0:
+            win_pnls.append(pnl_usd)
+        elif pnl_usd < 0:
+            loss_pnls.append(-pnl_usd)
+    return win_pnls, loss_pnls
+
+
 def compute_metrics_for_period(start: datetime, end: datetime) -> dict:
     """
     Compute metrics for an explicit time window [start, end].
@@ -66,10 +86,9 @@ def compute_metrics_for_period(start: datetime, end: datetime) -> dict:
         snapshots = []
 
     actionable = [t for t in trades if t["action"] in ("buy", "sell") and t["success"]]
-    wins = [t for t in actionable if t.get("outcome") == "correct"]
-    losses = [t for t in actionable if t.get("outcome") == "wrong"]
-    evaluated = len(wins) + len(losses)
-    win_rate = len(wins) / evaluated if evaluated > 0 else 0
+    win_pnls, loss_pnls = _win_loss_pnls(actionable)
+    evaluated = len(win_pnls) + len(loss_pnls)
+    win_rate = len(win_pnls) / evaluated if evaluated > 0 else 0
 
     pnl = 0.0
     pnl_pct = 0.0
@@ -109,25 +128,25 @@ def compute_metrics(days: int | None = None) -> dict:
     snapshots = _get_snapshots(days)
 
     actionable = [t for t in trades if t["action"] in ("buy", "sell") and t["success"]]
-    wins = [t for t in actionable if t.get("outcome") == "correct"]
-    losses = [t for t in actionable if t.get("outcome") == "wrong"]
-    evaluated = len(wins) + len(losses)
 
-    # Win rate
-    win_rate = len(wins) / evaluated if evaluated > 0 else 0
+    # Win/loss by NET P&L sign (not the ±2% correct/wrong label): a trade is
+    # a win if the market moved its way by more than costs. This makes every
+    # resolved trade count — a small favorable move is a small win, not a
+    # "neutral" that vanishes from the stats — and makes profit factor and
+    # expectancy real $ ratios instead of position-size ratios.
+    win_pnls, loss_pnls = _win_loss_pnls(actionable)
+    evaluated = len(win_pnls) + len(loss_pnls)
 
-    # Average trade amounts
-    win_amounts = [t.get("amount_usd", 0) for t in wins]
-    loss_amounts = [t.get("amount_usd", 0) for t in losses]
-    avg_win = sum(win_amounts) / len(win_amounts) if win_amounts else 0
-    avg_loss = sum(loss_amounts) / len(loss_amounts) if loss_amounts else 0
+    win_rate = len(win_pnls) / evaluated if evaluated > 0 else 0
 
-    # Profit factor
-    total_wins = sum(win_amounts)
-    total_losses = sum(loss_amounts)
+    avg_win = sum(win_pnls) / len(win_pnls) if win_pnls else 0
+    avg_loss = sum(loss_pnls) / len(loss_pnls) if loss_pnls else 0
+
+    total_wins = sum(win_pnls)
+    total_losses = sum(loss_pnls)
     profit_factor = total_wins / total_losses if total_losses > 0 else float("inf") if total_wins > 0 else 0
 
-    # Expectancy (expected $ per trade)
+    # Expectancy (expected net $ per trade)
     expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss) if evaluated > 0 else 0
 
     # PnL from snapshots
@@ -194,8 +213,8 @@ def compute_metrics(days: int | None = None) -> dict:
         "total_trades": len(actionable),
         "holds": len([t for t in trades if t["action"] == "hold"]),
         "evaluated": evaluated,
-        "wins": len(wins),
-        "losses": len(losses),
+        "wins": len(win_pnls),
+        "losses": len(loss_pnls),
         "win_rate": round(win_rate, 3),
         "avg_win_usd": round(avg_win, 2),
         "avg_loss_usd": round(avg_loss, 2),
@@ -276,20 +295,16 @@ def _compute_streaks(trades: list[dict]) -> tuple[str, int, int]:
     max_loss = 0
 
     for t in reversed(trades):  # oldest first
-        outcome = t.get("outcome", "")
-        if outcome == "correct":
-            if current_type == "win":
-                current_len += 1
-            else:
-                current_type = "win"
-                current_len = 1
+        pnl = trade_pnl.decision_pnl_pct(t["action"], t.get("price"), t.get("price_after_4h"))
+        if pnl is None or pnl == 0:
+            continue  # unevaluated or exactly break-even — not part of a streak
+        if pnl > 0:
+            current_len = current_len + 1 if current_type == "win" else 1
+            current_type = "win"
             max_win = max(max_win, current_len)
-        elif outcome == "wrong":
-            if current_type == "loss":
-                current_len += 1
-            else:
-                current_type = "loss"
-                current_len = 1
+        else:
+            current_len = current_len + 1 if current_type == "loss" else 1
+            current_type = "loss"
             max_loss = max(max_loss, current_len)
 
     streak_str = f"{current_len} {'win' if current_type == 'win' else 'loss'}" if current_type else "none"
@@ -307,9 +322,10 @@ def _per_asset_breakdown(trades: list[dict]) -> dict:
 
         by_asset[base]["trades"] += 1
         by_asset[base]["volume_usd"] += t.get("amount_usd", 0)
-        if t.get("outcome") == "correct":
+        pnl = trade_pnl.decision_pnl_pct(t["action"], t.get("price"), t.get("price_after_4h"))
+        if pnl is not None and pnl > 0:
             by_asset[base]["wins"] += 1
-        elif t.get("outcome") == "wrong":
+        elif pnl is not None and pnl < 0:
             by_asset[base]["losses"] += 1
 
     result = {}

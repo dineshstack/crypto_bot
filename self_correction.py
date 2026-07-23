@@ -5,13 +5,17 @@ At the start of each cycle, evaluates the outcome of the previous actionable
 trade (buy/sell) and — if it was wrong — asks Claude to generate a one-sentence
 lesson that gets stored and injected into future prompts.
 
-Outcome thresholds (applied 4 h after the trade, i.e. the next cycle):
+Outcome thresholds (applied config.OUTCOME_HORIZON_HOURS after the trade):
   buy  + price now  -2 %+ → "wrong"         (bought into a drop)
   buy  + price now  +2 %+ → "correct"
   sell + price now  +2 %+ → "wrong"         (sold before a rally)
   sell + price now  -2 %+ → "correct"
   hold + |change|   >3 %  → "missed_opportunity"
   otherwise               → "neutral"
+
+These correct/wrong/neutral LABELS drive the lesson loop + RL. Continuous
+per-trade P&L (for win rate / Kelly / analytics) is computed separately in
+trade_pnl.py from the entry and horizon prices stored here.
 """
 from __future__ import annotations
 
@@ -71,9 +75,10 @@ def _generate_lesson(trade: dict, pct: float, result: str, symbol: str) -> str:
     d = trade.get("decision") or {}
     if isinstance(d, str):
         d = json.loads(d or "{}")
+    horizon = config.OUTCOME_HORIZON_HOURS
     if result == "missed_opportunity":
         headline = (
-            f"You chose to HOLD, but {symbol} moved {pct:+.1f}% over the next 4 h — "
+            f"You chose to HOLD, but {symbol} moved {pct:+.1f}% over the next {horizon} h — "
             f"a missed opportunity."
         )
     else:
@@ -86,7 +91,7 @@ def _generate_lesson(trade: dict, pct: float, result: str, symbol: str) -> str:
         f"RSI {m.get('rsi','?')} | F&G {m.get('fear_greed','?')}/100 | "
         f"vs SMA20 {m.get('vs_sma20_pct','?')}%\n"
         f"Your reasoning: \"{d.get('reason','')}\"\n"
-        f"Price moved {pct:+.1f}% over the next 4 h.\n\n"
+        f"Price moved {pct:+.1f}% over the next {horizon} h.\n\n"
         f"Lesson:"
     )
     r = _client.messages.create(
@@ -101,10 +106,10 @@ def evaluate_and_learn(current_price: float | None = None,
                        max_trades: int = 10) -> list[str]:
     """
     Evaluate up to max_trades unevaluated decisions (buys, sells AND holds)
-    that are past the 4h outcome window. Symbol-aware: each decision is
-    scored against its own symbol's price 4h after the decision, so ETH
-    holds are never compared to the BTC price and week-old backlog rows are
-    scored at their historical window, not today.
+    that are past the outcome window (config.OUTCOME_HORIZON_HOURS).
+    Symbol-aware: each decision is scored against its own symbol's price at
+    the horizon, so ETH holds are never compared to the BTC price and
+    week-old backlog rows are scored at their historical window, not today.
     Returns the list of newly generated lessons (wrong trades and missed
     opportunities both teach).
     """
@@ -118,7 +123,8 @@ def evaluate_and_learn(current_price: float | None = None,
         symbol = market.get("symbol") or "BTC/USDT"
 
         try:
-            eval_ts_ms = int(trade["created_at"].timestamp() * 1000) + 4 * 3_600_000
+            eval_ts_ms = (int(trade["created_at"].timestamp() * 1000)
+                          + config.OUTCOME_HORIZON_HOURS * 3_600_000)
             now_price = _market_price(symbol, at_ts_ms=eval_ts_ms)
         except Exception as exc:
             logger.warning("Outcome eval: no price for %s (trade #%s): %s",

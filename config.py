@@ -92,6 +92,19 @@ CYCLE_FAILURE_HALT    = 3     # Halt after 3 consecutive failed analysis cycles
 # Bot behaviour
 ANALYSIS_INTERVAL_HOURS = 4   # Run Claude analysis every 4 hours
 
+# Outcome evaluation — how long after a decision we mark it to market to
+# judge it. 4h was too short: in a range-bound market almost nothing moved
+# ±2% in 4h, so trades resolved "neutral" and win rate / Kelly stayed
+# undefined (which pinned position sizing to the floor and left the
+# drawdown-reduce circuit breaker dormant). A longer horizon captures more
+# of the move the decision was actually betting on, so trades resolve to
+# real wins/losses and the risk machinery comes alive.
+OUTCOME_HORIZON_HOURS = 12
+# One-way execution cost (fee + slippage) subtracted from each trade's
+# decision P&L so win rate / expectancy / Kelly are NET of costs, not gross.
+# Matches the backtester's per-side assumption (0.1% fee + 0.05% slippage).
+DECISION_COST_PCT = 0.15
+
 # Claude models
 CLAUDE_MODEL         = "claude-haiku-4-5"   # frequent analysis — cheap
 CLAUDE_DEEP_MODEL    = "claude-fable-5"     # deep reasoning: weekly review, thesis, reports, coin research

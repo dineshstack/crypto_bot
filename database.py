@@ -156,9 +156,11 @@ def log_trade(result: dict, decision: dict, snapshot: dict) -> str:
 
 
 def get_recent_trades(n: int = 5) -> list[dict]:
+    # price_after_4h + market are needed for per-trade P&L (win rate, Kelly,
+    # analytics) and per-asset breakdown — see trade_pnl.decision_pnl_pct.
     rows = _execute(
         """SELECT id, created_at, action, amount_usd, price, success, error,
-                  outcome, decision
+                  outcome, price_after_4h, decision, market
            FROM trades ORDER BY created_at DESC LIMIT %s""",
         (n,),
         fetch="all",
@@ -166,6 +168,8 @@ def get_recent_trades(n: int = 5) -> list[dict]:
     for r in rows:
         if isinstance(r.get("decision"), str):
             r["decision"] = json.loads(r["decision"])
+        if isinstance(r.get("market"), str):
+            r["market"] = json.loads(r["market"] or "{}")
         r["created_at"] = str(r["created_at"])
     return rows
 
@@ -182,15 +186,16 @@ def get_last_unevaluated_trade() -> dict | None:
 
 def get_unevaluated_trades(limit: int = 10) -> list[dict]:
     """
-    Oldest-first unevaluated decisions — INCLUDING holds — that are at least
-    4h old (the outcome window). Holds were designed to be evaluated
-    (missed_opportunity) but were filtered out here for the bot's first
-    month, which is why the lessons table stayed empty.
+    Oldest-first unevaluated decisions — INCLUDING holds — that are past the
+    outcome window (config.OUTCOME_HORIZON_HOURS). Holds were designed to be
+    evaluated (missed_opportunity) but were filtered out here for the bot's
+    first month, which is why the lessons table stayed empty.
     """
+    horizon = int(config.OUTCOME_HORIZON_HOURS)  # int-cast guards the f-string
     return _execute(
-        """SELECT * FROM trades
+        f"""SELECT * FROM trades
            WHERE outcome IS NULL AND success = 1
-             AND created_at <= NOW() - INTERVAL 4 HOUR
+             AND created_at <= NOW() - INTERVAL {horizon} HOUR
            ORDER BY created_at ASC LIMIT %s""",
         (limit,), fetch="all",
     )

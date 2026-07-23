@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import database as db
 import config
 import rl_position
+import trade_pnl
 
 logger = logging.getLogger(__name__)
 
@@ -39,36 +40,42 @@ class TradeRisk:
 # ── Trade History Statistics ─────────────────────────────────────────────────
 
 def _get_trade_stats() -> dict:
-    """Calculate win rate and avg win/loss from recent trade history."""
+    """
+    Win rate + avg win/loss PERCENTAGES from recent trades, for Kelly.
+
+    Previously this counted the ±2% correct/wrong label and — critically —
+    put each trade's POSITION SIZE ($) into avg_win_pct/avg_loss_pct. That
+    made Kelly's payoff ratio b = avg_win/avg_loss ≈ 1.0 always (every
+    position ~$6) and win_rate ~0.5, so Kelly was pinned at ~0 by
+    construction and position sizing never responded to a real edge.
+
+    Now it uses each trade's NET directional P&L % (trade_pnl), so the
+    inputs are genuine percentages and Kelly reflects the actual edge.
+    """
     trades = db.get_recent_trades(50)
+    default = {"win_rate": 0.5, "avg_win_pct": 1.5, "avg_loss_pct": 1.5,
+               "total_trades": 0, "wins": 0, "losses": 0}
     if not trades:
-        return {"win_rate": 0.5, "avg_win_pct": 1.5, "avg_loss_pct": 1.5,
-                "total_trades": 0, "wins": 0, "losses": 0}
+        return default
 
-    wins = []
-    losses = []
-
+    wins, losses = [], []   # win/loss magnitudes in PERCENT
     for t in trades:
-        if t.get("outcome") == "correct":
-            d = t.get("decision") or {}
-            wins.append(d.get("trade_usd", 5))
-        elif t.get("outcome") == "wrong":
-            d = t.get("decision") or {}
-            losses.append(d.get("trade_usd", 5))
+        pnl = trade_pnl.decision_pnl_pct(t.get("action"), t.get("price"), t.get("price_after_4h"))
+        if pnl is None:
+            continue
+        if pnl > 0:
+            wins.append(pnl)
+        elif pnl < 0:
+            losses.append(-pnl)
 
     total = len(wins) + len(losses)
     if total == 0:
-        return {"win_rate": 0.5, "avg_win_pct": 1.5, "avg_loss_pct": 1.5,
-                "total_trades": len(trades), "wins": 0, "losses": 0}
-
-    win_rate = len(wins) / total
-    avg_win = sum(wins) / len(wins) if wins else 5.0
-    avg_loss = sum(losses) / len(losses) if losses else 5.0
+        return {**default, "total_trades": len(trades)}
 
     return {
-        "win_rate": round(win_rate, 3),
-        "avg_win_pct": round(avg_win, 2),
-        "avg_loss_pct": round(avg_loss, 2),
+        "win_rate": round(len(wins) / total, 3),
+        "avg_win_pct": round(sum(wins) / len(wins), 2) if wins else 1.5,
+        "avg_loss_pct": round(sum(losses) / len(losses), 2) if losses else 1.5,
         "total_trades": total,
         "wins": len(wins),
         "losses": len(losses),
