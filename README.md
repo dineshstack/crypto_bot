@@ -1,21 +1,30 @@
 # 🤖 Claude Crypto Bot — AI-Powered BTC & ETH Trading System
 
-An institutional-grade **AI cryptocurrency trading bot** built with **Claude AI (Anthropic)**, featuring a multi-agent analysis pipeline, machine learning ensemble predictions, real-time WebSocket monitoring, and a full Next.js dashboard. Trades BTC/USDT and ETH/USDT on **Binance** with automated risk management, self-learning capabilities, and Telegram control.
+An **open-source AI cryptocurrency trading bot** built with **Claude AI (Anthropic)** — a multi-agent analysis pipeline, a machine-learning ensemble, real-time WebSocket monitoring, and a full Next.js dashboard. It trades **BTC/USDT and ETH/USDT on Binance** with automated risk management, a self-learning feedback loop, and Telegram control.
 
-**Built by [Dinesh Lakmal](https://dineshstack.com)** — Full-stack developer & crypto trading system architect.
+**Built by [Dinesh Lakmal](https://dineshstack.com)** — full-stack developer & crypto trading-system architect.
 
 [![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)](https://python.org)
-[![Claude AI](https://img.shields.io/badge/Claude-Haiku%20%2B%20Opus-orange?logo=anthropic)](https://anthropic.com)
+[![Claude AI](https://img.shields.io/badge/Claude-Fable%205%20%2B%20Haiku-orange?logo=anthropic)](https://anthropic.com)
 [![Binance](https://img.shields.io/badge/Binance-Spot%20API-yellow?logo=binance)](https://binance.com)
 [![MySQL](https://img.shields.io/badge/MySQL-8.0-blue?logo=mysql)](https://mysql.com)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![Stars](https://img.shields.io/github/stars/dineshstack/crypto_bot?style=social)](https://github.com/dineshstack/crypto_bot/stargazers)
+
+> ⭐ **If this project helps you learn or build, please star it** — it's the simplest way to support the work and helps others discover it.
+
+**Who is this for?** Developers and quant-curious traders who want a real, end-to-end reference for building an **AI trading system** — LLM agent orchestration, ML signal modelling, exchange execution, risk controls, and a production dashboard, all wired together. Use it to learn, fork it for your own strategy, or [contribute](#-contributing--collaborators-wanted).
+
+> 🧪 **Status:** actively developed and running in **paper-trading / Binance testnet**. This is a research and educational platform — **not** a get-rich-quick bot and not financial advice. See the [honest project status](#-project-status) and [disclaimer](#-disclaimer) before doing anything with real money.
 
 ---
 
 ## 📑 Table of Contents
 
 - [Features](#-features)
+- [Project Status](#-project-status)
 - [Architecture](#-architecture)
 - [Tech Stack](#-tech-stack)
 - [Multi-Agent Claude Pipeline](#-multi-agent-claude-pipeline)
@@ -28,6 +37,7 @@ An institutional-grade **AI cryptocurrency trading bot** built with **Claude AI 
 - [Configuration](#-configuration)
 - [Going Live](#-going-live)
 - [Project Structure](#-project-structure)
+- [Contributing — Collaborators Wanted](#-contributing--collaborators-wanted)
 - [Blog & Learning](#-blog--learning)
 
 ---
@@ -40,7 +50,7 @@ An institutional-grade **AI cryptocurrency trading bot** built with **Claude AI 
 - **HMM 5-State Regime Detection** — Hidden Markov Model classifies market as strong_trend, weak_trend, range, high_vol, or crash with 3-bar persistence filter
 - **15+ Data Sources** — Technical indicators, derivatives, news, social sentiment, on-chain, options, whale monitoring, macro correlations, MVRV-Z score
 - **Multi-Asset Trading** — BTC/USDT and ETH/USDT with independent analysis cycles
-- **Self-Learning Loop** — Evaluates trades 4h post-execution, generates lessons from mistakes, injects into future Claude prompts
+- **Self-Learning Loop** — Grades each decision against its outcome (default 12h window), turns mistakes into one-line lessons, and injects them into future Claude prompts
 
 ### Risk Management
 - **Quarter-Kelly Position Sizing** — Conservative 0.25× Kelly with 10pp win-rate discount
@@ -68,8 +78,22 @@ An institutional-grade **AI cryptocurrency trading bot** built with **Claude AI 
 - **AI Logs** — Every prompt sent to Claude and every response, grouped by analysis cycle
 - **Auto-Refresh Toggle** — Live/Paused mode with 30s refresh
 - **Health Bar** — Drawdown %, daily P&L, streak, risk level in header
-- **Contextual Tooltips** — Every metric has a `?` hover explanation
+- **Role-Based Access** — Multi-user login with admin / advisor / client roles (Laravel Sanctum + Spatie permissions); navigation adapts to each user's role
+- **Contextual Tooltips** — Every metric has a plain-English `?` hover explanation
 - **System Guide** — Complete documentation for users and advisors
+
+---
+
+## 🚦 Project Status
+
+**Honest and up to date** — because that's what makes this useful to learn from.
+
+- ✅ **Fully functional** end-to-end: analysis → decision → risk-managed execution → dashboard, running live on Binance **testnet**.
+- 🧪 **In the evaluation phase.** The system is being forward-tested to measure whether the strategy has a real, cost-adjusted edge before any real capital is committed.
+- 📊 **What the backtests show so far:** the current strategy behaves like a **defensive, market-neutral scalper** — it sidesteps drawdowns well but does **not** beat simple buy-and-hold in bull markets. Out-of-sample tests survive a placebo/leakage check, but realized returns are small. It is a solid *engineering* platform; the *alpha* is still an open research question.
+- 🎯 **This is exactly where contributors can help** — strategy research, better signals, and honest evaluation are the most valuable open problems here.
+
+> **Bottom line:** treat this as a serious, well-engineered reference implementation and a research sandbox — not a proven money printer. That framing is deliberate.
 
 ---
 
@@ -107,7 +131,7 @@ An institutional-grade **AI cryptocurrency trading bot** built with **Claude AI 
 
 | Layer | Technology |
 |-------|-----------|
-| **AI Engine** | Claude Haiku 4.5 (analysis), Claude Opus 4.8 (reports, research) |
+| **AI Engine** | Claude Haiku 4.5 (fast 4h analysis), Claude Fable 5 (deep reasoning: weekly reviews, research, reports) with Claude Opus 4.8 fallback |
 | **ML Model** | XGBoost + LightGBM stacking ensemble, Optuna hyperparameter tuning |
 | **Regime Detection** | Gaussian HMM (hmmlearn) with persistence filter |
 | **Feature Selection** | Boruta-SHAP (with scikit-learn fallback) |
@@ -360,6 +384,33 @@ crypto_bot/
 
 ---
 
+## 🤝 Contributing — Collaborators Wanted
+
+**This project is actively looking for collaborators.** Whether you're a trader, a quant, an ML engineer, or a frontend developer, there's meaningful work here — and you'll be building on a real, running system rather than a toy.
+
+### Where help is most valuable
+
+| Area | Examples of good contributions |
+|------|-------------------------------|
+| 🧠 **Strategy & research** | New signals, better entry/exit logic, ideas to capture trend (the current strategy is defensive — see [Project Status](#-project-status)) |
+| 📈 **ML modelling** | Feature engineering, model calibration, honest walk-forward evaluation, reducing overfitting |
+| 🛡️ **Risk & execution** | Smarter position sizing, OCO/bracket orders, slippage modelling, live-trading safety |
+| 💻 **Dashboard (Next.js)** | New visualizations, UX, mobile polish, accessibility |
+| 🧪 **Testing & tooling** | Backtest rigor, unit tests, CI, reproducible experiments |
+| 📖 **Docs** | Setup guides, tutorials, architecture write-ups, translations |
+
+### How to get involved
+
+1. ⭐ **Star the repo** and open an [issue](https://github.com/dineshstack/crypto_bot/issues) describing what you'd like to work on (or a bug/idea).
+2. 💬 Have a bigger idea or want to pair up? Reach out via [dineshstack.com](https://dineshstack.com) or start a [Discussion](https://github.com/dineshstack/crypto_bot/discussions).
+3. 🍴 Fork, branch, and open a Pull Request. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for dev setup, coding style, and the PR checklist.
+
+**New here?** Look for issues labelled `good first issue`. All skill levels welcome — thoughtful questions and doc fixes count too.
+
+Please keep contributions respectful and constructive; by participating you agree to uphold a friendly, harassment-free environment.
+
+---
+
 ## 📚 Blog & Learning
 
 Visit **[dineshstack.com](https://dineshstack.com)** for articles on:
@@ -384,4 +435,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-**Keywords:** AI crypto trading bot, Claude AI trading, cryptocurrency automated trading, Bitcoin trading bot, Ethereum trading bot, Binance trading bot Python, machine learning crypto prediction, XGBoost cryptocurrency, sentiment analysis crypto, on-chain analytics, options flow trading, whale monitoring, portfolio management, risk management Kelly criterion, ATR stop-loss, reinforcement learning trading, Next.js trading dashboard, real-time WebSocket crypto, multi-agent AI system, Claude Haiku Opus, algorithmic trading, quantitative trading crypto, market regime detection HMM, fear greed index trading, MVRV-Z score, derivatives analysis, funding rate trading
+**Keywords:** open source AI crypto trading bot, Claude AI trading bot, LLM trading agent, multi-agent AI trading system, cryptocurrency automated trading, Bitcoin trading bot Python, Ethereum trading bot, Binance trading bot, algorithmic trading bot open source, machine learning crypto prediction, XGBoost LightGBM cryptocurrency, stacking ensemble trading, sentiment analysis crypto, on-chain analytics, options flow trading, whale monitoring, Kelly criterion position sizing, ATR stop-loss, reinforcement learning trading, market regime detection HMM, backtesting framework Python, Next.js trading dashboard, real-time WebSocket crypto, FastAPI Laravel trading API, Anthropic Claude Fable Opus Haiku, quantitative trading crypto, fear and greed index, MVRV-Z score, funding rate trading, crypto trading bot tutorial, build your own trading bot
