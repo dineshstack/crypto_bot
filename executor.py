@@ -68,6 +68,24 @@ def _place_exit_orders(exchange: ccxt.binance, symbol: str, action: str,
     return result
 
 
+def _min_notional(exchange: ccxt.binance, symbol: str) -> float:
+    """
+    The exchange's real minimum order value (price * qty) for this symbol,
+    read from ccxt's normalized market limits. Binance rejects any order
+    below this with a NOTIONAL filter error — risk-managed sizing (Kelly
+    /ATR/confidence, or a circuit-breaker halving) can shrink well below
+    it, so this must be checked at order time, not assumed from config.
+    Falls back to a conservative constant if markets aren't loaded yet.
+    """
+    try:
+        cost_min = exchange.markets.get(symbol, {}).get("limits", {}).get("cost", {}).get("min")
+        if cost_min:
+            return float(cost_min)
+    except Exception:
+        pass
+    return config.EXCHANGE_MIN_NOTIONAL_FALLBACK
+
+
 def _sized_amount(action: str, decision: dict, recommended_usd: float,
                   size_scale: float = 1.0) -> tuple[float, bool]:
     """
@@ -130,6 +148,18 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
     }
 
     if action == "buy":
+        # Bump to the exchange's real minimum notional BEFORE the balance
+        # and allocation checks below, so those checks validate the size
+        # that will actually be submitted — not the pre-bump one.
+        min_notional = _min_notional(exchange, symbol)
+        if amount < min_notional:
+            bumped = round(min_notional * 1.01, 2)  # 1% buffer for price drift before fill
+            logger.info(
+                "BUY %s: sizing bumped $%.2f → $%.2f to clear exchange minimum notional ($%.2f)",
+                base, amount, bumped, min_notional,
+            )
+            amount = bumped
+
         if portfolio["usdt"] < amount + 1.0:
             result["error"] = f"Low USDT: have ${portfolio['usdt']:.2f}, need ${amount:.2f}+fee"
             logger.warning(result["error"])
@@ -181,7 +211,33 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
             return result
 
         # Risk-managed sell: use recommended amount or 10% of holdings, whichever is less
-        sell_usd = min(amount, portfolio["btc"] * price * 0.10)
+        holding_usd = portfolio["btc"] * price
+        sell_usd = min(amount, holding_usd * 0.10)
+
+        # A 10% trim can fall below the exchange's minimum notional even
+        # when the recommended amount wouldn't — bump up to the minimum
+        # (safe: it only means trimming a slightly larger slice), unless
+        # the whole position is smaller than the minimum (dust — can't be
+        # sold via a market order at all).
+        min_notional = _min_notional(exchange, symbol)
+        if sell_usd < min_notional:
+            if holding_usd >= min_notional:
+                # Cap at the full holding — never propose selling more
+                # than is actually owned.
+                bumped = min(round(min_notional * 1.01, 2), round(holding_usd, 2))
+                logger.info(
+                    "SELL %s: sizing bumped $%.2f → $%.2f (10%% trim was below exchange minimum $%.2f)",
+                    base, sell_usd, bumped, min_notional,
+                )
+                sell_usd = bumped
+            else:
+                result["error"] = (
+                    f"Position (${holding_usd:.2f}) below exchange minimum "
+                    f"(${min_notional:.2f}) — too small to sell"
+                )
+                logger.warning(result["error"])
+                return result
+
         btc_qty = sell_usd / price
 
         min_qty = (exchange.markets.get(symbol, {})

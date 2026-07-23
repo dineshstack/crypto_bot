@@ -41,7 +41,7 @@ ASSET_CONFIG = {
     "BTC/USDT": {
         "base": "BTC",
         "base_trade_usd": 5.0,
-        "min_trade_usd": 2.0,
+        "min_trade_usd": 6.0,
         "max_trade_usd": 15.0,
         "max_alloc_pct": 0.60,
         "ws_symbol": "btcusdt",
@@ -50,7 +50,7 @@ ASSET_CONFIG = {
     "ETH/USDT": {
         "base": "ETH",
         "base_trade_usd": 3.0,
-        "min_trade_usd": 2.0,
+        "min_trade_usd": 6.0,
         "max_trade_usd": 10.0,
         "max_alloc_pct": 0.25,
         "ws_symbol": "ethusdt",
@@ -60,8 +60,16 @@ ASSET_CONFIG = {
 
 # Trading safety limits — code enforces these, Claude just suggests
 BASE_TRADE_USD     = 5.0    # Claude's default suggestion
-MIN_TRADE_USD      = 2.0    # Absolute floor per trade
+# Binance's real minNotional filter is $5.00 on both BTC/USDT and ETH/USDT
+# (verified against exchange.markets 2026-07-23). MIN_TRADE_USD must clear
+# that with headroom, or risk-managed sizing (Kelly/ATR/confidence, or a
+# circuit-breaker halving) silently produces orders Binance rejects — this
+# is what caused ~50% of buy signals over 2026-07-09..07-23 to execute for
+# $0. executor.py also checks the live exchange minimum at order time, but
+# this static floor should already clear it in the common case.
+MIN_TRADE_USD      = 6.0    # Absolute floor per trade
 MAX_TRADE_USD      = 15.0   # Absolute ceiling per trade (7.5% of $200)
+EXCHANGE_MIN_NOTIONAL_FALLBACK = 5.0  # used only if live market limits aren't loaded
 MAX_BTC_ALLOC_PCT  = 0.60   # Stop buying if BTC > 60% of portfolio
 MAX_TOTAL_CRYPTO_PCT = 0.80 # Max total crypto allocation (BTC+ETH) = 80%
 STOP_LOSS_PCT      = 0.09   # Pause bot if total portfolio drops 9%
