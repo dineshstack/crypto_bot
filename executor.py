@@ -18,29 +18,25 @@ import risk_manager
 logger = logging.getLogger(__name__)
 
 
-def _place_exit_orders(exchange: ccxt.binance, symbol: str, action: str,
-                       qty: float, stop_loss: float, take_profit: float) -> dict:
+def _place_exit_orders(exchange: ccxt.binance, symbol: str,
+                       qty: float, stop_loss: float) -> dict:
     """
-    Place ONE protective stop-loss + take-profit bracket for the position.
-
-    After BUY → place SELL stop-loss + SELL take-profit limit.
-    After SELL → place BUY stop-loss + BUY take-profit limit.
+    Place ONE protective stop-loss covering the whole position.
 
     Existing open orders for the symbol are cancelled first. The bot buys
-    repeatedly without closing each position, so per-trade brackets used to
+    repeatedly without closing each position, so per-trade stops used to
     accumulate until Binance rejected new ones with MAX_NUM_ALGO_ORDERS —
     leaving fresh positions unprotected. Cancelling first keeps exactly one
-    bracket (2 algo orders) covering the whole holding.
+    stop covering the whole holding.
+
+    Spot LONG-ONLY bot: it only ever holds the asset (a "sell" is a partial
+    trim, not a short), so the protective stop always sits on the SELL side.
 
     Returns order refs plus `stop_protected` (True only if the stop-loss is
     actually resting on the exchange) so the caller can alert when a position
     is left unprotected instead of swallowing the failure.
     """
     result = {"stop_loss_order": None, "take_profit_order": None, "stop_protected": False}
-    # This is a spot LONG-ONLY bot: it only ever holds the asset, and a
-    # "sell" is a partial trim, not a short. The protective bracket therefore
-    # always sits on the SELL side (stop below market, take-profit above) to
-    # cover the remaining long — regardless of which action triggered it.
     exit_side = "sell"
     base = symbol.split("/")[0]
 
@@ -56,9 +52,15 @@ def _place_exit_orders(exchange: ccxt.binance, symbol: str, action: str,
     except Exception as exc:
         logger.debug("Could not list open orders for %s: %s", symbol, exc)
 
-    # Stop-loss
+    # Protective stop-loss ONLY. We deliberately do NOT place a separate
+    # take-profit: on spot, a whole-position stop reserves the entire base
+    # balance, so a second sell order for the same units fails with
+    # "insufficient balance". Profit-taking is handled by the strategy (the
+    # analysis loop trims on sell signals), so the exchange-side order just
+    # needs to be the safety net. (An OCO would sell the whole position on
+    # either leg, which contradicts the 10%-trim exit logic.)
     try:
-        sl_limit = _price_to_precision(exchange, symbol, stop_loss * (0.999 if action == "buy" else 1.001))
+        sl_limit = _price_to_precision(exchange, symbol, stop_loss * 0.999)
         result["stop_loss_order"] = exchange.create_order(
             symbol=symbol,
             type="STOP_LOSS_LIMIT",
@@ -74,24 +76,6 @@ def _place_exit_orders(exchange: ccxt.binance, symbol: str, action: str,
         )
     except Exception as exc:
         logger.warning("Stop-loss order FAILED — position unprotected: %s", exc)
-
-    # Take-profit
-    try:
-        tp_price = _price_to_precision(exchange, symbol, take_profit)
-        result["take_profit_order"] = exchange.create_order(
-            symbol=symbol,
-            type="TAKE_PROFIT_LIMIT",
-            side=exit_side,
-            amount=qty,
-            price=tp_price,
-            params={"stopPrice": tp_price, "timeInForce": "GTC"},
-        )
-        logger.info(
-            "Take-profit placed: %s %.6f %s @ $%,.0f",
-            exit_side.upper(), qty, base, take_profit,
-        )
-    except Exception as exc:
-        logger.warning("Take-profit order failed (non-fatal): %s", exc)
 
     return result
 
@@ -266,8 +250,7 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
             if risk.stop_loss_price > 0:
                 total_qty = _amount_to_precision(exchange, symbol, portfolio["btc"] + filled_qty)
                 exit_orders = _place_exit_orders(
-                    exchange, symbol, action, total_qty,
-                    risk.stop_loss_price, risk.take_profit_price,
+                    exchange, symbol, total_qty, risk.stop_loss_price,
                 )
                 result["stop_order"] = exit_orders.get("stop_loss_order")
                 result["tp_order"] = exit_orders.get("take_profit_order")
@@ -341,8 +324,7 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
             remaining_qty = _amount_to_precision(exchange, symbol, max(0.0, portfolio["btc"] - filled_qty))
             if risk.stop_loss_price > 0 and remaining_qty > 0:
                 exit_orders = _place_exit_orders(
-                    exchange, symbol, action, remaining_qty,
-                    risk.stop_loss_price, risk.take_profit_price,
+                    exchange, symbol, remaining_qty, risk.stop_loss_price,
                 )
                 result["stop_order"] = exit_orders.get("stop_loss_order")
                 result["tp_order"] = exit_orders.get("take_profit_order")
