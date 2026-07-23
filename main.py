@@ -97,6 +97,17 @@ _weekly_start_usd: float | None = None   # portfolio at start of current ISO wee
 _weekly_key:       str          = ""     # ISO year-week when _weekly_start_usd was recorded
 _cycle_failures:   int          = 0      # consecutive failed analysis cycles
 
+# Execution-health window: True/False for whether each recently SUBMITTED
+# order actually filled. Gate-skips (Low USDT, allocation cap, R:R, dust)
+# don't count — only orders that reached the exchange. A run of failures
+# here means our sizing/precision is producing invalid orders, which no
+# portfolio-value circuit breaker would ever catch (rejected orders don't
+# move the portfolio). Reset on restart; re-accumulates within a few cycles.
+_exec_window: list[bool] = []
+EXEC_WINDOW_SIZE   = 6   # look back this many submitted orders
+EXEC_FAIL_ALERT    = 3   # alert when this many of the window failed
+_exec_alerted:     bool  = False  # de-dupe: alert once per failure streak
+
 
 def _persist_halt(reason: str):
     """Record a durable halt so auto-start cannot resurrect trading past it."""
@@ -104,6 +115,45 @@ def _persist_halt(reason: str):
         db.set_state("halted", reason)
     except Exception as exc:
         logger.error("Failed to persist halt state: %s", exc)
+
+
+async def _check_execution_health(result: dict, symbol: str):
+    """
+    Track whether SUBMITTED orders are actually filling, and alert on a run
+    of exchange rejections. Only orders that reached the exchange count —
+    gate-skips (insufficient balance, allocation cap, R:R, dust) are normal
+    and ignored. This is the monitor that would have caught the two-week
+    $0-notional failure within hours: rejected orders don't move the
+    portfolio, so no value-based circuit breaker ever fires on them.
+    """
+    global _exec_window, _exec_alerted
+
+    if not result.get("submitted"):
+        return  # order never reached the exchange — not an execution outcome
+
+    _exec_window.append(bool(result.get("success")))
+    if len(_exec_window) > EXEC_WINDOW_SIZE:
+        _exec_window = _exec_window[-EXEC_WINDOW_SIZE:]
+
+    fails = _exec_window.count(False)
+
+    if fails >= EXEC_FAIL_ALERT and not _exec_alerted:
+        _exec_alerted = True
+        err = result.get("error", "unknown")
+        logger.error("Execution health: %d/%d recent orders REJECTED — %s",
+                     fails, len(_exec_window), err)
+        db.log_event("execution_failure",
+                     f"{fails}/{len(_exec_window)} recent orders rejected",
+                     "error", {"last_error": err, "symbol": symbol})
+        await notify(
+            f"🚨 *Execution health warning*\n"
+            f"{fails} of the last {len(_exec_window)} submitted orders were "
+            f"*rejected by the exchange* \\(not risk\\-gated skips\\)\\.\n"
+            f"Latest: `{_esc(str(err)[:120])}`\n"
+            f"Trades are being decided but not filling — check sizing/precision\\."
+        )
+    elif fails == 0:
+        _exec_alerted = False  # clean streak — re-arm the alert
 
 
 # ── Circuit-breaker helpers ────────────────────────────────────────────────
@@ -345,15 +395,24 @@ async def _on_anomaly(event: ws_stream.AnomalyEvent):
 
 # ── Live-trade confirmation flow ────────────────────────────────────────────
 
-def _confirmation_message(decision: dict, snap: dict, port: dict) -> str:
+def _confirmation_message(decision: dict, snap: dict, port: dict,
+                          preview: dict | None = None) -> str:
     price   = snap["price"]
-    btc_qty = decision["trade_usd"] / price
+    base    = snap.get("symbol", config.SYMBOL).split("/")[0]
+    # Prefer the executor's dry-run size (what will actually fill) over
+    # Claude's advisory trade_usd, which the executor overrides.
+    if preview and preview.get("planned_usd"):
+        exec_usd = preview["planned_usd"]
+        exec_qty = preview["planned_qty"]
+    else:
+        exec_usd = decision["trade_usd"]
+        exec_qty = exec_usd / price
     signals = ", ".join(decision.get("signals", [])) or "—"
     return (
         f"⏳ *LIVE TRADE — CONFIRM BEFORE EXECUTION*\n\n"
         f"Action:     *{decision['action'].upper()}*\n"
-        f"Amount:     *${decision['trade_usd']:.2f}*  ({btc_qty:.6f} BTC)\n"
-        f"BTC price:  *${price:,}*\n"
+        f"Amount:     *${exec_usd:.2f}*  ({exec_qty:.6f} {base})\n"
+        f"{base} price:  *${price:,}*\n"
         f"Confidence: {decision['confidence']:.0%}  \\|  Risk: {decision['risk']}\n\n"
         f"📊 Signals: `{signals}`\n"
         f"💬 _{decision['reason']}_\n\n"
@@ -364,11 +423,12 @@ def _confirmation_message(decision: dict, snap: dict, port: dict) -> str:
 
 
 async def request_confirmation(decision: dict, snap: dict, port: dict,
-                               timeout: int = 300) -> bool:
+                               timeout: int = 300, preview: dict | None = None) -> bool:
     """
     Send a Telegram inline-button confirmation request.
     Waits up to `timeout` seconds. Returns True if approved, False otherwise.
-    Only called when TESTNET=false.
+    Only called when TESTNET=false. `preview` is the executor dry-run result,
+    used to show the true executed size.
     """
     conf_id = str(uuid_mod.uuid4())
     event   = asyncio.Event()
@@ -377,7 +437,7 @@ async def request_confirmation(decision: dict, snap: dict, port: dict,
 
     db.save_pending_confirmation(conf_id, decision, snap, port)
 
-    msg_text = _confirmation_message(decision, snap, port)
+    msg_text = _confirmation_message(decision, snap, port, preview=preview)
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Execute",  callback_data=f"approve_{conf_id}"),
         InlineKeyboardButton("❌ Cancel",   callback_data=f"reject_{conf_id}"),
@@ -617,9 +677,14 @@ async def run_cycle():
                 logger.info("Total-crypto cap: BTC buy blocked at %.1f%%",
                             combined["crypto_alloc_pct"])
 
-        # In LIVE mode, get human approval before any buy/sell
+        # In LIVE mode, get human approval before any buy/sell — show the
+        # ACTUAL executed size (risk-managed + min-notional bump), not
+        # Claude's advisory trade_usd, so the number you approve matches
+        # what fills.
         if not config.TESTNET and decision["action"] in ("buy", "sell"):
-            confirmed = await request_confirmation(decision, snap, port)
+            preview = executor.execute(exchange, decision, snap, port,
+                                       size_scale=_sizing_scale, dry_run=True)
+            confirmed = await request_confirmation(decision, snap, port, preview=preview)
             if not confirmed:
                 logger.info("Trade rejected/expired by user — skipping.")
                 db.log_trade(
@@ -635,6 +700,7 @@ async def run_cycle():
                                   size_scale=_sizing_scale)
         if result.get("risk_data"):
             decision["risk_data"] = result["risk_data"]
+        await _check_execution_health(result, snap.get("symbol", config.SYMBOL))
         db.log_trade(result, decision, snap)
         db.log_event("trade", f"{decision['action'].upper()} ${decision['trade_usd']:.2f}",
                      data={"action": decision["action"], "amount": decision["trade_usd"],
@@ -777,9 +843,11 @@ async def run_eth_cycle():
             decision["action"] = "hold"
             decision["reason"] = f"Total crypto at {full_port['crypto_alloc_pct']:.0f}% (max {config.MAX_TOTAL_CRYPTO_PCT:.0%})"
 
-        # In LIVE mode, get approval
+        # In LIVE mode, get approval — show the true executed size
         if not config.TESTNET and decision["action"] in ("buy", "sell"):
-            confirmed = await request_confirmation(decision, snap, eth_port)
+            preview = executor.execute(exchange, decision, snap, eth_port,
+                                       size_scale=_sizing_scale, dry_run=True)
+            confirmed = await request_confirmation(decision, snap, eth_port, preview=preview)
             if not confirmed:
                 logger.info("ETH trade rejected/expired by user — skipping.")
                 return
@@ -787,6 +855,7 @@ async def run_eth_cycle():
         # Execute using the ETH symbol (circuit-breaker scale applies here too)
         result = executor.execute(exchange, decision, snap, eth_port,
                                   size_scale=_sizing_scale)
+        await _check_execution_health(result, eth_sym)
         db.log_trade(result, decision, snap)
         db.log_event(
             "trade_eth",

@@ -32,14 +32,14 @@ def _place_exit_orders(exchange: ccxt.binance, symbol: str, action: str,
 
     # Stop-loss
     try:
-        sl_limit = round(stop_loss * (0.999 if action == "buy" else 1.001), 2)
+        sl_limit = _price_to_precision(exchange, symbol, stop_loss * (0.999 if action == "buy" else 1.001))
         result["stop_loss_order"] = exchange.create_order(
             symbol=symbol,
             type="STOP_LOSS_LIMIT",
             side=exit_side,
             amount=qty,
             price=sl_limit,
-            params={"stopPrice": round(stop_loss, 2), "timeInForce": "GTC"},
+            params={"stopPrice": _price_to_precision(exchange, symbol, stop_loss), "timeInForce": "GTC"},
         )
         logger.info(
             "Stop-loss placed: %s %.6f %s trigger=$%,.0f limit=$%,.0f",
@@ -50,13 +50,14 @@ def _place_exit_orders(exchange: ccxt.binance, symbol: str, action: str,
 
     # Take-profit
     try:
+        tp_price = _price_to_precision(exchange, symbol, take_profit)
         result["take_profit_order"] = exchange.create_order(
             symbol=symbol,
             type="TAKE_PROFIT_LIMIT",
             side=exit_side,
             amount=qty,
-            price=round(take_profit, 2),
-            params={"stopPrice": round(take_profit, 2), "timeInForce": "GTC"},
+            price=tp_price,
+            params={"stopPrice": tp_price, "timeInForce": "GTC"},
         )
         logger.info(
             "Take-profit placed: %s %.6f %s @ $%,.0f",
@@ -66,6 +67,27 @@ def _place_exit_orders(exchange: ccxt.binance, symbol: str, action: str,
         logger.warning("Take-profit order failed (non-fatal): %s", exc)
 
     return result
+
+
+def _amount_to_precision(exchange: ccxt.binance, symbol: str, qty: float) -> float:
+    """
+    Round an order quantity to the exchange's LOT_SIZE step for this symbol.
+    ccxt normalizes the step per market; hardcoded rounding breaks the moment
+    a new asset with a different step is added. Falls back to the raw qty if
+    the market isn't loaded.
+    """
+    try:
+        return float(exchange.amount_to_precision(symbol, qty))
+    except Exception:
+        return qty
+
+
+def _price_to_precision(exchange: ccxt.binance, symbol: str, price: float) -> float:
+    """Round a price to the exchange's PRICE_FILTER tick for this symbol."""
+    try:
+        return float(exchange.price_to_precision(symbol, price))
+    except Exception:
+        return round(price, 2)
 
 
 def _min_notional(exchange: ccxt.binance, symbol: str) -> float:
@@ -107,7 +129,15 @@ def _sized_amount(action: str, decision: dict, recommended_usd: float,
 
 
 def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
-            portfolio: dict, size_scale: float = 1.0) -> dict:
+            portfolio: dict, size_scale: float = 1.0, dry_run: bool = False) -> dict:
+    """
+    Size and (unless dry_run) place a market order + bracket exits.
+
+    dry_run=True runs the full sizing + gate pipeline and returns the exact
+    order that WOULD be submitted (planned_usd / planned_qty), without
+    touching the exchange. Used to show the true executed size in the LIVE
+    confirmation prompt, so the number you approve matches what fills.
+    """
     action = decision["action"]
     confidence = decision.get("confidence", 0.5)
     price = snapshot["price"]
@@ -135,6 +165,9 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
         "stop_order": None,
         "success": False,
         "error": None,
+        "submitted": False,   # True once an order was actually sent to the exchange
+        "planned_usd": 0.0,   # dry_run: the size that would be ordered
+        "planned_qty": 0.0,   # dry_run: the base qty that would be ordered
         "risk_data": {
             "recommended_usd": risk.recommended_usd,
             "stop_loss": risk.stop_loss_price,
@@ -179,23 +212,32 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
             logger.warning(result["error"])
             return result
 
-        btc_qty = amount / price
+        btc_qty = _amount_to_precision(exchange, symbol, amount / price)
+
+        if dry_run:
+            result.update({"planned_usd": amount, "planned_qty": btc_qty, "success": True})
+            return result
+
         try:
+            result["submitted"] = True
             order = exchange.create_market_buy_order(symbol, btc_qty)
+            # Prefer the exchange's actual fill over our pre-order estimate
+            filled_qty = float(order.get("filled") or btc_qty)
+            filled_usd = float(order.get("cost") or amount)
             result.update({
-                "success": True, "amount_usd": amount,
-                "btc_amount": btc_qty, "order": order,
+                "success": True, "amount_usd": filled_usd,
+                "btc_amount": filled_qty, "order": order,
             })
             logger.info(
                 "BUY %.6f %s for $%.2f @ $%,.0f | SL=$%,.0f TP=$%,.0f R:R=%.1f",
-                btc_qty, base, amount, price,
+                filled_qty, base, filled_usd, price,
                 risk.stop_loss_price, risk.take_profit_price, risk.risk_reward_ratio,
             )
 
             # Place stop-loss order on exchange (non-blocking)
             if risk.stop_loss_price > 0:
                 exit_orders = _place_exit_orders(
-                    exchange, symbol, action, btc_qty,
+                    exchange, symbol, action, filled_qty,
                     risk.stop_loss_price, risk.take_profit_price,
                 )
                 result["stop_order"] = exit_orders.get("stop_loss_order")
@@ -238,7 +280,7 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
                 logger.warning(result["error"])
                 return result
 
-        btc_qty = sell_usd / price
+        btc_qty = _amount_to_precision(exchange, symbol, sell_usd / price)
 
         min_qty = (exchange.markets.get(symbol, {})
                    .get("limits", {}).get("amount", {}).get("min", 0.00001))
@@ -247,20 +289,27 @@ def execute(exchange: ccxt.binance, decision: dict, snapshot: dict,
             logger.warning(result["error"])
             return result
 
+        if dry_run:
+            result.update({"planned_usd": sell_usd, "planned_qty": btc_qty, "success": True})
+            return result
+
         try:
+            result["submitted"] = True
             order = exchange.create_market_sell_order(symbol, btc_qty)
+            filled_qty = float(order.get("filled") or btc_qty)
+            filled_usd = float(order.get("cost") or sell_usd)
             result.update({
-                "success": True, "amount_usd": sell_usd,
-                "btc_amount": btc_qty, "order": order,
+                "success": True, "amount_usd": filled_usd,
+                "btc_amount": filled_qty, "order": order,
             })
             logger.info(
                 "SELL %.6f %s for $%.2f @ $%,.0f | SL=$%,.0f",
-                btc_qty, base, sell_usd, price, risk.stop_loss_price,
+                filled_qty, base, filled_usd, price, risk.stop_loss_price,
             )
 
             if risk.stop_loss_price > 0:
                 exit_orders = _place_exit_orders(
-                    exchange, symbol, action, btc_qty,
+                    exchange, symbol, action, filled_qty,
                     risk.stop_loss_price, risk.take_profit_price,
                 )
                 result["stop_order"] = exit_orders.get("stop_loss_order")
