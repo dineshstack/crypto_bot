@@ -105,6 +105,21 @@ OUTCOME_HORIZON_HOURS = 12
 # Matches the backtester's per-side assumption (0.1% fee + 0.05% slippage).
 DECISION_COST_PCT = 0.15
 
+# Correct/wrong/neutral LABEL threshold, volatility-relative.
+# A fixed ±2% is regime-blind: in a flat, mean-reverting market almost no
+# trade moves ±2% in the horizon, so everything logs "neutral"; in a wild
+# market ±2% resolves trivially. Instead the threshold scales with the
+# asset's hourly ATR at trade time — "significant" relative to how much this
+# asset actually moves. Uses ATR directly (not ATR×√horizon): in a ranging
+# market net moves are far smaller than a random walk predicts, so √-scaling
+# would over-shoot and keep everything neutral. Floored so noise-level moves
+# stay neutral, capped so a volatility spike doesn't demand an absurd move.
+OUTCOME_ATR_MULT      = 0.6   # correct/wrong if |move| > this × atr_pct
+OUTCOME_MISSED_MULT   = 0.9   # hold = missed_opportunity if |move| > this × atr_pct
+OUTCOME_MIN_THRESHOLD = 0.5   # floor (%) — moves smaller than this stay neutral
+OUTCOME_MAX_THRESHOLD = 3.0   # cap (%) — never require more than this
+OUTCOME_FALLBACK_ATR  = 1.5   # atr_pct to assume if the trade stored none
+
 # Claude models
 CLAUDE_MODEL         = "claude-haiku-4-5"   # frequent analysis — cheap
 CLAUDE_DEEP_MODEL    = "claude-fable-5"     # deep reasoning: weekly review, thesis, reports, coin research

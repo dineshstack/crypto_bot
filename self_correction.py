@@ -50,20 +50,36 @@ def _market_price(symbol: str, at_ts_ms: int | None = None) -> float:
             return float(candles[0][4])
     return float(_data_ex.fetch_ticker(symbol)["last"])
 
+# Kept for reference / backward-compat; the live thresholds are now
+# volatility-relative (see _threshold and config.OUTCOME_ATR_MULT).
 WRONG_THRESHOLD_PCT  = 2.0
 MISSED_THRESHOLD_PCT = 3.0
 
 
-def _outcome(action: str, trade_price: float, now_price: float) -> tuple[str, float]:
+def _threshold(atr_pct: float | None, mult: float) -> float:
+    """
+    Volatility-relative outcome threshold (%): mult × the asset's hourly ATR
+    at trade time, clamped to [MIN, MAX]. Bigger for volatile assets, smaller
+    for calm ones — so "significant move" means significant *for this market*.
+    """
+    atr = atr_pct if atr_pct and atr_pct > 0 else config.OUTCOME_FALLBACK_ATR
+    return max(config.OUTCOME_MIN_THRESHOLD,
+               min(config.OUTCOME_MAX_THRESHOLD, mult * atr))
+
+
+def _outcome(action: str, trade_price: float, now_price: float,
+             atr_pct: float | None = None) -> tuple[str, float]:
     pct = (now_price - trade_price) / trade_price * 100
+    wrong  = _threshold(atr_pct, config.OUTCOME_ATR_MULT)
+    missed = _threshold(atr_pct, config.OUTCOME_MISSED_MULT)
     if action == "buy":
-        if pct < -WRONG_THRESHOLD_PCT:  return "wrong",              pct
-        if pct >  WRONG_THRESHOLD_PCT:  return "correct",            pct
+        if pct < -wrong:  return "wrong",              pct
+        if pct >  wrong:  return "correct",            pct
     elif action == "sell":
-        if pct >  WRONG_THRESHOLD_PCT:  return "wrong",              pct
-        if pct < -WRONG_THRESHOLD_PCT:  return "correct",            pct
+        if pct >  wrong:  return "wrong",              pct
+        if pct < -wrong:  return "correct",            pct
     elif action == "hold":
-        if abs(pct) > MISSED_THRESHOLD_PCT: return "missed_opportunity", pct
+        if abs(pct) > missed: return "missed_opportunity", pct
     return "neutral", pct
 
 
@@ -131,7 +147,9 @@ def evaluate_and_learn(current_price: float | None = None,
                            symbol, trade["id"], exc)
             continue
 
-        result, pct = _outcome(trade["action"], float(trade["price"]), now_price)
+        atr_pct = market.get("atr_pct")
+        result, pct = _outcome(trade["action"], float(trade["price"]), now_price,
+                               atr_pct=float(atr_pct) if atr_pct else None)
         db.update_trade_outcome(trade["id"], result, now_price)
         logger.info("Trade #%s (%s %s) outcome: %s (%+.1f%%)",
                     trade["id"], symbol, trade["action"], result, pct)
