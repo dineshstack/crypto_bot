@@ -184,6 +184,64 @@ async def _warn_if_unprotected(result: dict, symbol: str):
     )
 
 
+async def _check_take_profit(exchange, snap: dict) -> bool:
+    """
+    Bot-managed take-profit: if the accumulated position is up >= TAKE_PROFIT_PCT
+    vs its average entry, market-sell it to bank the gain and go flat.
+
+    The Decision agent never emits "sell" and the exchange take-profit order was
+    removed (spot balance conflict with the stop), so without this the bot only
+    ever bought and held — gains were never realised. This restores the exit
+    that drives ~80% of the backtested edge. Returns True if it sold.
+    """
+    symbol = snap.get("symbol", config.SYMBOL)
+    base = symbol.split("/")[0]
+    pos = db.get_position(symbol)
+    if pos["qty"] <= 0 or pos["avg_entry"] <= 0:
+        return False
+
+    price = snap["price"]
+    gain_pct = (price / pos["avg_entry"] - 1) * 100
+    if gain_pct < config.TAKE_PROFIT_PCT:
+        return False
+
+    # Reconcile tracked qty with the REAL balance — an exchange-side stop may
+    # have closed the position without the bot observing it, leaving stale
+    # cost-basis state. Sell only what's actually held; if it's gone, reset.
+    try:
+        actual = float(exchange.fetch_balance().get(base, {}).get("free", 0.0))
+    except Exception:
+        actual = pos["qty"]
+    sell_qty = min(pos["qty"], actual)
+    if sell_qty <= 0:
+        db.update_position(symbol, "sell", pos["qty"], 0.0)  # stale state → flat
+        logger.info("Take-profit: tracked %s position gone from exchange — reset to flat", base)
+        return False
+
+    result = executor.take_profit_sell(exchange, symbol, sell_qty, pos["avg_entry"], price)
+    if not result["success"]:
+        logger.warning("Take-profit sell did not execute: %s", result.get("error"))
+        return False
+
+    db.update_position(symbol, "sell", result["btc_amount"], result["amount_usd"])
+    base = symbol.split("/")[0]
+    tp_decision = {
+        "action": "sell", "trade_usd": result["amount_usd"], "confidence": 1.0,
+        "risk": "low", "reason": f"Take-profit: position +{gain_pct:.2f}% vs avg entry",
+    }
+    db.log_trade(result, tp_decision, snap)
+    db.log_event("take_profit",
+                 f"{base} take-profit +{gain_pct:.2f}% (${result['amount_usd']:.2f})",
+                 data={"symbol": symbol, "gain_pct": round(gain_pct, 2),
+                       "avg_entry": round(pos["avg_entry"], 2)})
+    await notify(
+        f"💰 *Take\\-profit* {_esc(base)}  \\+{gain_pct:.2f}%\n"
+        f"Sold the position for ${result['amount_usd']:.2f} "
+        f"\\(avg entry ${pos['avg_entry']:,.0f} → ${price:,.0f}\\)"
+    )
+    return True
+
+
 # ── Circuit-breaker helpers ────────────────────────────────────────────────
 
 def _count_consecutive_losses() -> int:
@@ -614,6 +672,11 @@ async def run_cycle():
         if not await _check_circuit_breakers(total):
             return
 
+        # Bot-managed take-profit — the only profit-realisation path (the agent
+        # never sells). Realise the position if it's up to target, then refresh.
+        if await _check_take_profit(exchange, snap):
+            port = md.get_portfolio(exchange)
+
         # Stop-loss guard (legacy — kept for backward compatibility)
         if baseline_usd and total < baseline_usd * (1 - config.STOP_LOSS_PCT):
             msg = (
@@ -730,6 +793,9 @@ async def run_cycle():
             decision["risk_data"] = result["risk_data"]
         await _check_execution_health(result, snap.get("symbol", config.SYMBOL))
         await _warn_if_unprotected(result, snap.get("symbol", config.SYMBOL))
+        if result.get("success") and decision["action"] in ("buy", "sell"):
+            db.update_position(snap.get("symbol", config.SYMBOL), decision["action"],
+                               result.get("btc_amount", 0), result.get("amount_usd", 0))
         db.log_trade(result, decision, snap)
         db.log_event("trade", f"{decision['action'].upper()} ${decision['trade_usd']:.2f}",
                      data={"action": decision["action"], "amount": decision["trade_usd"],
@@ -799,6 +865,11 @@ async def run_eth_cycle():
         eth_cfg = config.ASSET_CONFIG[eth_sym]
 
         snap = multi_asset.get_asset_snapshot(exchange, eth_sym)
+
+        # Bot-managed take-profit for ETH — realise the position if up to target
+        # (same as the BTC cycle) before re-reading the portfolio below.
+        await _check_take_profit(exchange, snap)
+
         full_port = multi_asset.get_full_portfolio(exchange)
         port_ctx = multi_asset.format_portfolio_context(full_port)
 
@@ -888,6 +959,9 @@ async def run_eth_cycle():
             decision["risk_data"] = result["risk_data"]   # was missing — ETH trades stored no stop/target
         await _check_execution_health(result, eth_sym)
         await _warn_if_unprotected(result, eth_sym)
+        if result.get("success") and decision["action"] in ("buy", "sell"):
+            db.update_position(eth_sym, decision["action"],
+                               result.get("btc_amount", 0), result.get("amount_usd", 0))
         db.log_trade(result, decision, snap)
         db.log_event(
             "trade_eth",

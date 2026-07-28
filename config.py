@@ -69,6 +69,15 @@ BASE_TRADE_USD     = 5.0    # Claude's default suggestion
 # this static floor should already clear it in the common case.
 MIN_TRADE_USD      = 6.0    # Absolute floor per trade
 MAX_TRADE_USD      = 15.0   # Absolute ceiling per trade (7.5% of $200)
+
+# Bot-managed take-profit. The Decision agent never emits "sell" and the
+# exchange take-profit order was removed (spot balance conflict with the
+# stop), so the bot only ever bought and held — gains were never realised
+# and every position eventually stopped out (a guaranteed bleed in a range).
+# Backtest attribution: ~80% of the strategy's profit comes from taking
+# profit at target. Each cycle, if the average-cost position is up by this
+# %, sell it to bank the gain — restoring that mechanism.
+TAKE_PROFIT_PCT    = 1.5    # realise the position when up this % vs avg entry
 EXCHANGE_MIN_NOTIONAL_FALLBACK = 5.0  # used only if live market limits aren't loaded
 MAX_BTC_ALLOC_PCT  = 0.60   # Stop buying if BTC > 60% of portfolio
 MAX_TOTAL_CRYPTO_PCT = 0.80 # Max total crypto allocation (BTC+ETH) = 80%

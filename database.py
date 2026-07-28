@@ -134,6 +134,41 @@ def clear_state(key: str):
     _execute("DELETE FROM bot_state WHERE k = %s", (key,))
 
 
+# ── Position cost-basis (durable) — feeds the bot-managed take-profit ─────────
+
+def get_position(symbol: str) -> dict:
+    """
+    Current accumulated position for a symbol: total base qty, total USD cost,
+    and the average entry price. Survives restarts (stored in bot_state).
+    """
+    raw = get_state(f"position_{symbol}")
+    d = json.loads(raw) if raw else {}
+    qty  = float(d.get("qty", 0.0))
+    cost = float(d.get("cost", 0.0))
+    avg  = cost / qty if qty > 1e-9 else 0.0
+    return {"qty": qty, "cost": cost, "avg_entry": avg}
+
+
+def update_position(symbol: str, action: str, filled_qty: float, filled_usd: float):
+    """
+    Maintain average-cost position state after a fill. A buy adds qty + cost;
+    a sell removes qty and a proportional slice of cost. Resets to flat when
+    the remaining qty rounds to dust.
+    """
+    pos = get_position(symbol)
+    qty, cost = pos["qty"], pos["cost"]
+    if action == "buy":
+        qty  += filled_qty
+        cost += filled_usd
+    elif action == "sell" and qty > 0:
+        frac = min(1.0, filled_qty / qty)
+        cost *= (1.0 - frac)
+        qty  -= filled_qty
+    if qty < 1e-8:
+        qty, cost = 0.0, 0.0
+    set_state(f"position_{symbol}", json.dumps({"qty": max(0.0, qty), "cost": max(0.0, cost)}))
+
+
 # ── Trades ───────────────────────────────────────────────────────────────────
 
 def log_trade(result: dict, decision: dict, snapshot: dict) -> str:

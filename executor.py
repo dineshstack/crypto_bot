@@ -119,6 +119,54 @@ def _min_notional(exchange: ccxt.binance, symbol: str) -> float:
     return config.EXCHANGE_MIN_NOTIONAL_FALLBACK
 
 
+def take_profit_sell(exchange: ccxt.binance, symbol: str, qty: float,
+                     avg_entry: float, price: float) -> dict:
+    """
+    Market-sell the whole position to REALISE a gain (bot-managed take-profit).
+    Cancels any resting stop order first so it isn't orphaned. Separate from
+    execute()'s "sell" path, which only trims 10% — take-profit banks the
+    full position and goes flat, matching the round-trip the backtest models.
+    """
+    base = symbol.split("/")[0]
+    result = {
+        "action": "sell", "amount_usd": 0.0, "btc_amount": 0.0, "order": None,
+        "success": False, "error": None, "submitted": False, "take_profit": True,
+    }
+    qty = _amount_to_precision(exchange, symbol, qty)
+    min_qty = (exchange.markets.get(symbol, {})
+               .get("limits", {}).get("amount", {}).get("min", 0.00001))
+    if qty < min_qty:
+        result["error"] = f"TP qty {qty:.8f} below minimum {min_qty}"
+        return result
+
+    # Cancel the resting stop-loss so it isn't left orphaned after we go flat.
+    try:
+        for o in exchange.fetch_open_orders(symbol):
+            try:
+                exchange.cancel_order(o["id"], symbol)
+            except Exception as exc:
+                logger.debug("TP: could not cancel order %s: %s", o.get("id"), exc)
+    except Exception as exc:
+        logger.debug("TP: could not list open orders for %s: %s", symbol, exc)
+
+    try:
+        result["submitted"] = True
+        order = exchange.create_market_sell_order(symbol, qty)
+        filled_qty = float(order.get("filled") or qty)
+        filled_usd = float(order.get("cost") or qty * price)
+        result.update({"success": True, "amount_usd": filled_usd,
+                       "btc_amount": filled_qty, "order": order})
+        gain = (price / avg_entry - 1) * 100 if avg_entry > 0 else 0.0
+        logger.info(
+            "TAKE-PROFIT: sold %.6f %s @ $%,.0f (avg entry $%,.0f, +%.2f%%) for $%.2f",
+            filled_qty, base, price, avg_entry, gain, filled_usd,
+        )
+    except Exception as e:
+        result["error"] = str(e)
+        logger.error("Take-profit sell failed: %s", e)
+    return result
+
+
 def _sized_amount(action: str, decision: dict, recommended_usd: float,
                   size_scale: float = 1.0) -> tuple[float, bool]:
     """
