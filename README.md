@@ -38,7 +38,7 @@ An **open-source AI cryptocurrency trading bot** built with **Claude AI (Anthrop
 - [Going Live](#-going-live)
 - [Project Structure](#-project-structure)
 - [Contributing — Collaborators Wanted](#-contributing--collaborators-wanted)
-- [Blog & Learning](#-blog--learning)
+- [Write-ups](#-write-ups)
 
 ---
 
@@ -411,15 +411,18 @@ Please keep contributions respectful and constructive; by participating you agre
 
 ---
 
-## 📚 Blog & Learning
+## 📚 Write-ups
 
-Visit **[dineshstack.com](https://dineshstack.com)** for articles on:
-- Building AI-powered trading systems
-- Claude AI multi-agent architectures
-- Machine learning for cryptocurrency prediction
-- Real-time WebSocket data processing
-- Full-stack development with Next.js + Python
-- VPS deployment and DevOps
+The reasoning behind this codebase is documented in longer form. Start here if you want the *why* rather than the *what*:
+
+| Article | What it covers |
+|---|---|
+| **[How I Built an AI Crypto Trading Bot with Claude AI](https://dineshstack.com/en/ai-crypto-trading-bot-claude)** | The multi-agent LLM pipeline, the ML ensemble, and how the layers reconcile into a single decision |
+| **[How to Deploy an AI Crypto Trading Bot on Your VPS](https://dineshstack.com/en/deploy-ai-crypto-trading-bot-vps)** | Step-by-step deployment: prerequisites, the exact API keys required, and training the ML model on your own box |
+| **[How to Contribute to an Open-Source AI Trading Bot](https://dineshstack.com/en/contribute-open-source-ai-trading-bot)** | Where help is most needed — strategy, ML, dashboard, DevOps — and how to get the project running locally |
+| **[How to Use Claude AI to Manage a Production Server Safely](https://dineshstack.com/en/how-to-use-claude-ai-to-manage-a-production-server-safely)** | Guardrails and human-in-the-loop sudo. Worth reading before you leave any AI-driven process running unattended |
+
+More on Laravel, Next.js, AI engineering and DevOps at **[dineshstack.com](https://dineshstack.com)**.
 
 ---
 
