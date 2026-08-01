@@ -2,7 +2,7 @@
 
 An **open-source AI cryptocurrency trading bot** built with **Claude AI (Anthropic)** — a multi-agent analysis pipeline, a machine-learning ensemble, real-time WebSocket monitoring, and a full Next.js dashboard. It trades **BTC/USDT and ETH/USDT on Binance** with automated risk management, a self-learning feedback loop, and Telegram control.
 
-**Built by [Dinesh Lakmal](https://dineshstack.com)** — full-stack developer & crypto trading-system architect.
+**Built by [Dinesh Wijethunga](https://dineshstack.com)** — full-stack developer & crypto trading-system architect.
 
 [![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)](https://python.org)
 [![Claude AI](https://img.shields.io/badge/Claude-Fable%205%20%2B%20Haiku-orange?logo=anthropic)](https://anthropic.com)
